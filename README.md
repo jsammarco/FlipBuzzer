@@ -194,12 +194,12 @@ The app creates the sound folder automatically if it does not exist:
 
 | Main Menu | Output Modes |
 | --- | --- |
-| ![Main Menu](https://raw.githubusercontent.com/jsammarco/FlipBuzzer/refs/heads/main/Screenshots/Main%20Menu.png) | ![Output Modes](https://raw.githubusercontent.com/jsammarco/FlipBuzzer/refs/heads/main/Screenshots/Output%20Modes.png) |
+| ![Main Menu](Screenshots/Main%20Menu.png) | ![Output Modes](Screenshots/Output%20Modes.png) |
 | Main navigation with the active output mode shown in the header. | Output destination selection for external, internal, or both. |
 
 | Saved Sounds | Morse Code |
 | --- | --- |
-| ![Saved Sounds](https://raw.githubusercontent.com/jsammarco/FlipBuzzer/refs/heads/main/Screenshots/Saved%20Screen.png) | ![Morse Code](https://raw.githubusercontent.com/jsammarco/FlipBuzzer/refs/heads/main/Screenshots/Morse%20Code.png) |
+| ![Saved Sounds](Screenshots/Saved%20Screen.png) | ![Morse Code](Screenshots/Morse%20Code.png) |
 | Built-in sounds plus the custom file browser entry. | Morse message editor and sender screen. |
 
 ## Building
