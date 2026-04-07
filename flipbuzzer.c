@@ -597,6 +597,18 @@ static void flipbuzzer_browse_and_play_file(FlipBuzzerApp* app) {
 }
 
 static void flipbuzzer_draw_main_menu(Canvas* canvas, const FlipBuzzerApp* app) {
+    const uint8_t visible_items = 5;
+    uint8_t start_index = 0;
+
+    if(FlipBuzzerMainMenuCount > visible_items) {
+        if(app->main_menu_index >= visible_items - 1) {
+            start_index = app->main_menu_index - (visible_items - 2);
+        }
+        if(start_index > FlipBuzzerMainMenuCount - visible_items) {
+            start_index = FlipBuzzerMainMenuCount - visible_items;
+        }
+    }
+
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 10, FLIPBUZZER_APP_NAME);
     canvas_set_font(canvas, FontSecondary);
@@ -604,8 +616,11 @@ static void flipbuzzer_draw_main_menu(Canvas* canvas, const FlipBuzzerApp* app) 
         canvas, 126, 1, AlignRight, AlignTop, flipbuzzer_get_output_label(app));
     canvas_draw_line(canvas, 0, 13, 127, 13);
 
-    for(uint8_t i = 0; i < FlipBuzzerMainMenuCount; i++) {
-        uint8_t y = 22 + (i * 9);
+    for(uint8_t row = 0; row < visible_items; row++) {
+        uint8_t i = start_index + row;
+        if(i >= FlipBuzzerMainMenuCount) break;
+
+        uint8_t y = 22 + (row * 9);
         if(i == app->main_menu_index) {
             canvas_draw_box(canvas, 0, y - 8, 108, 10);
             canvas_set_color(canvas, ColorWhite);
@@ -614,6 +629,13 @@ static void flipbuzzer_draw_main_menu(Canvas* canvas, const FlipBuzzerApp* app) 
         } else {
             canvas_draw_str(canvas, 8, y, flipbuzzer_main_menu_items[i]);
         }
+    }
+
+    if(start_index > 0) {
+        canvas_draw_str(canvas, 116, 23, "^");
+    }
+    if((start_index + visible_items) < FlipBuzzerMainMenuCount) {
+        canvas_draw_str(canvas, 116, 59, "v");
     }
 }
 
