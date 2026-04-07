@@ -221,6 +221,22 @@ The app creates the sound folder automatically if it does not exist:
 
 `/ext/apps_data/flipbuzzer`
 
+## PWM Ideas
+
+FlipBuzzer's PWM output can be useful for quick bench testing and small hardware experiments. A few good starter uses:
+
+- RC servos and ESCs: many expect a `50 Hz` signal with roughly `5%` to `10%` duty for position or throttle control
+- LEDs: PWM is great for brightness control, blink patterns, and simple visual signaling
+- Vibration motors: useful for haptic feedback tests or silent notification experiments
+- Digital clocking: a steady PWM signal can act as a simple clock source for counters, shift registers, or logic testing
+- Custom signal patterns: `.fbsnd` files can be used to play repeatable timing and frequency sequences for quick signal experiments
+
+Tips:
+
+- Start with low power test loads and add proper driver circuitry when needed
+- Use `A7` for external PWM devices and make sure grounds are shared
+- Do not drive larger motors, lasers, or other higher-current hardware directly from the Flipper pin
+
 ## Technical Notes
 
 - External buzzer output uses Flipper PWM on `TIM1 PA7`
