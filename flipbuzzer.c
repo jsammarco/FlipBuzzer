@@ -139,7 +139,7 @@ static const char* flipbuzzer_saved_sound_items[FlipBuzzerSavedSoundCount] = {
 };
 
 static const char* flipbuzzer_output_mode_labels[FlipBuzzerOutputCount] = {
-    "External",
+    "External (A7)",
     "Internal",
     "Both",
 };
@@ -620,16 +620,11 @@ static void flipbuzzer_draw_generator(Canvas* canvas, const FlipBuzzerApp* app) 
     canvas_draw_str(canvas, 2, 49, line);
 
     canvas_draw_line(canvas, 0, 52, 127, 52);
-    canvas_draw_str(canvas, 2, 61, "L/R Hz D/U Duty");
+    canvas_draw_str(canvas, 2, 61, "Hz / Duty");
     if(app->generator_playing) {
-        canvas_draw_str(canvas, 90, 49, "Play");
+        canvas_draw_str_aligned(canvas, 126, 54, AlignRight, AlignTop, "OK Stop");
     } else {
-        canvas_draw_str(canvas, 90, 49, "Stop");
-    }
-    if(app->generator_playing) {
-        canvas_draw_str(canvas, 74, 61, "OK Stop");
-    } else {
-        canvas_draw_str(canvas, 76, 61, "OK Play");
+        canvas_draw_str_aligned(canvas, 126, 54, AlignRight, AlignTop, "OK Play");
     }
 }
 

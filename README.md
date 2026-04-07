@@ -1,93 +1,216 @@
-# FlipPar
+# FlipBuzzer
 
-FlipPar is a Flipper Zero external app for tracking golf or disc golf rounds on-device. It lets you set the number of holes and players, rename players, record par and score values hole-by-hole, and export a plain-text score sheet to the SD card.
+FlipBuzzer is a Flipper Zero external app for driving a buzzer from GPIO `A7`, the internal speaker, or both at the same time. It includes a live frequency generator, built-in test sounds, playback for simple text-based sound files, and a Morse code sender.
 
 | Release Download |
 | --- |
-| **Ready to install on your Flipper?** Download the packaged `.fap` build from the latest release: **[FlipPar Main Release](https://github.com/jsammarco/FlipPar/releases/tag/Main)** |
+| Build this repo locally with the included scripts, or package the generated `.fap` into your own Flipper workflow. |
 
 ## Features
 
-- Supports 1 to 27 holes
-- Supports 1 to 10 players
-- Editable player names
-- Per-hole par tracking
-- Per-player hole scores
-- Automatic current-round persistence and restore
-- Running total view with leader summary relative to par
-- Plain-text score-sheet export to the SD card
+- Select `External`, `Internal`, or `Both` output modes
+- Live frequency generator with adjustable frequency and duty cycle
+- Built-in startup chime and alert beep
+- File browser for custom `.fbsnd` sound sequences stored on the SD card
+- Morse code text entry and playback
+- Startup sound on launch
+- Helper PowerShell scripts for building and deploying from Windows
 
-## Screenshots
+## Screens
 
-| Splash | Setup 1 |
-| --- | --- |
-| ![Loading screen](https://raw.githubusercontent.com/jsammarco/FlipPar/refs/heads/main/Screenshots/Loading%20Screen.png) | ![First setup screen](https://raw.githubusercontent.com/jsammarco/FlipPar/refs/heads/main/Screenshots/Menu1.png) |
-| Startup splash while the app initializes. | First setup screen with round options and quick actions. |
+### Main Menu
 
-| Setup 2 | Main |
-| --- | --- |
-| ![Second setup screen](https://raw.githubusercontent.com/jsammarco/FlipPar/refs/heads/main/Screenshots/Menu2.png) | ![Main view without grid](https://raw.githubusercontent.com/jsammarco/FlipPar/refs/heads/main/Screenshots/Main%20View%20No%20Grid.png) |
-| Second setup screen with additional round actions and export options. | Main round view before switching to the full score grid. |
+The main menu is the app hub. It contains:
 
-| Grid | Totals |
-| --- | --- |
-| ![Score grid view](https://raw.githubusercontent.com/jsammarco/FlipPar/refs/heads/main/Screenshots/Grid%20View.png) | ![Totals view](https://raw.githubusercontent.com/jsammarco/FlipPar/refs/heads/main/Screenshots/Totals.png) |
-| Hole-by-hole score entry with par and player rows. | Running totals with the leaderboard relative to par. |
+- `Output Mode`
+- `Frequency Generator`
+- `Saved Sounds`
+- `Morse Code`
+- `About`
+
+The current output mode is shown in the top-right corner of the screen.
+
+### Output Mode
+
+Choose where sound is sent:
+
+- `External`: PWM output on GPIO `A7`
+- `Internal`: Flipper Zero internal speaker
+- `Both`: external buzzer and internal speaker together
+
+### Frequency Generator
+
+The generator is for manually dialing in a tone and duty cycle.
+
+- `Left` / `Right`: decrease or increase frequency
+- `Up` / `Down`: increase or decrease duty cycle
+- `OK`: start or stop playback
+- Long `OK`: reset to the defaults
+- `Back`: stop playback and return to the main menu
+
+Defaults:
+
+- Frequency: `1000 Hz`
+- Duty cycle: `50%`
+
+Ranges:
+
+- Frequency: `20 Hz` to `20000 Hz`
+- Duty cycle: `1%` to `99%`
+
+Step size:
+
+- Below `1000 Hz`, frequency changes in `10 Hz` steps
+- At or above `1000 Hz`, frequency changes in `100 Hz` steps
+
+### Saved Sounds
+
+This screen lets you play:
+
+- `Startup Chime`
+- `Alert Beep`
+- `Browse Sound Files`
+
+The browse option opens the Flipper file browser at:
+
+`/ext/apps_data/flipbuzzer`
+
+Only files ending in `.fbsnd` are shown.
+
+### Morse Code
+
+The Morse screen supports a short text message that can be sent as audio output.
+
+- `OK`: open the text editor
+- Long `OK`: transmit the current message as Morse code
+- `Back`: return to the main menu
+
+Default message:
+
+- `SOS`
+
+Supported characters include:
+
+- `A-Z`
+- `0-9`
+- Common punctuation such as `. , ? ! / - ( ) : ; = + @ ' "`
+
+Unsupported characters are skipped during playback.
+
+### About
+
+The about screen is a simple information page inside the app.
 
 ## Controls
 
-### Setup screen
+### Main Menu
 
-- `Up` / `Down`: move between setup fields
-- `Left` / `Right`: change holes, players, or selected player name slot
-- `OK` on `Name`: open the text editor for that player
-- `OK` on `Start Round`: begin score entry
-- `OK` on `New Game`: clear the current scorecard after confirmation
-- `OK` on `Save Score Sheet`: export the current round
+- `Up` / `Down`: move through menu items
+- `OK`: open the selected screen
+- `Back`: exit the app
 
-### Score grid
+### Output Mode
 
-- `Left` / `Right`: move between holes
-- `Up` / `Down`: move between par row and player rows
-- Short `OK`: increase the selected par or score value
-- Long `OK`: decrease the selected par or score value
-- `Back`: return to setup
+- `Up` / `Down`: cycle through output modes
+- `OK`: confirm and return
+- `Back`: return without changing screens
 
-## Save Location
+### Frequency Generator
 
-Exported score sheets are written to:
+- `Left` / `Right`: change frequency
+- `Up` / `Down`: change duty cycle
+- `OK`: toggle play and stop
+- Long `OK`: reset frequency and duty cycle
+- `Back`: stop output and return
 
-`/ext/apps_data/flippar`
+### Saved Sounds
 
-Files are created with a date-and-time-based name such as:
+- `Up` / `Down`: move through the list
+- `OK`: play the selected sound or open the file browser
+- `Back`: return to the main menu
 
-`FlipPar_2026-3-31_14-05-09.txt`
+### Morse Code
 
-If a file for that exact timestamp already exists, FlipPar appends a numeric suffix.
+- `OK`: edit the message
+- Long `OK`: send the message
+- `Back`: return to the main menu
 
-The in-progress round is also auto-saved to:
+## Custom Sound File Format
 
-`/ext/apps_data/flippar/current_round.bin`
+Custom sound files use the `.fbsnd` extension and are read as plain text.
 
-That file is used to restore the current scorecard if the app is closed and reopened.
+Each non-empty line can contain:
+
+`frequency duration_ms duty`
+
+Examples:
+
+```text
+440 150 50
+660 150 50
+880 300 60
+```
+
+Rules:
+
+- The first value is frequency in Hz
+- The second value is duration in milliseconds
+- The third value is optional duty cycle in percent
+- If duty is omitted, the app uses the default duty cycle of `50`
+- Lines beginning with `#` are treated as comments
+- Values can be separated by spaces, tabs, commas, or semicolons
+
+Parsing and limits:
+
+- Up to `128` tone steps are loaded
+- Files larger than `4096` bytes are rejected
+- Frequency is capped at `20000 Hz`
+- Duty is clamped to `1` through `99`
+- A line is ignored if it cannot be parsed into valid numeric values
+
+The app creates the sound folder automatically if it does not exist:
+
+`/ext/apps_data/flipbuzzer`
+
+## Technical Notes
+
+- External buzzer output uses Flipper PWM on `TIM1 PA7`
+- Internal speaker playback uses the Flipper speaker HAL
+- Internal speaker volume is set to `0.8`
+- The app attempts to acquire the internal speaker with a `50 ms` timeout
+- The app stops active output when leaving the generator screen or exiting
 
 ## Project Layout
 
-- `flippar.c` - main application source
-- `application.fam` - Flipper Zero app manifest
-- `icon.png` - Flipper package icon; must be `10x10`
-- `assets/splash_128x64.png` - bundled splash image shown at startup
+- `flipbuzzer.c` - main app implementation
+- `application.fam` - Flipper app manifest and metadata
+- `build.ps1` - mirrors the repo into a firmware tree and runs `fbt`
+- `deploy_to_flipper.ps1` - uploads the built `.fap` to a connected Flipper and launches it
+- `icon.png` - app icon used by the manifest
+- `assets/splash_128x64.png` - bundled image asset
+- `Screenshots/` - example UI screenshots
+
+## Screenshots
+
+| Main Menu | Output Modes |
+| --- | --- |
+| ![Main Menu](https://raw.githubusercontent.com/jsammarco/FlipBuzzer/refs/heads/main/Screenshots/Main%20Menu.png) | ![Output Modes](https://raw.githubusercontent.com/jsammarco/FlipBuzzer/refs/heads/main/Screenshots/Output%20Modes.png) |
+| Main navigation with the active output mode shown in the header. | Output destination selection for external, internal, or both. |
+
+| Saved Sounds | Morse Code |
+| --- | --- |
+| ![Saved Sounds](https://raw.githubusercontent.com/jsammarco/FlipBuzzer/refs/heads/main/Screenshots/Saved%20Screen.png) | ![Morse Code](https://raw.githubusercontent.com/jsammarco/FlipBuzzer/refs/heads/main/Screenshots/Morse%20Code.png) |
+| Built-in sounds plus the custom file browser entry. | Morse message editor and sender screen. |
 
 ## Building
 
-This repository contains a standard Flipper Zero external app layout:
+This repo is set up for the standard Flipper Zero external app workflow.
 
-- `application.fam` defines the app metadata and entry point
-- `flippar.c` contains the app implementation
+`build.ps1` does three things:
 
-To build it, place this project in your Flipper Zero firmware external-apps workflow and compile it with your preferred Flipper build toolchain. If you already build external `.fap` apps, this project is ready to drop into that process as-is.
-
-This repo also includes a helper script, `build.ps1`, that mirrors this project into your firmware tree and runs `fbt`.
+1. Resolves the source repo and firmware paths.
+2. Mirrors this project into `applications_user/flipbuzzer` inside your firmware tree.
+3. Runs `fbt` to build the app unless you tell it not to.
 
 Default usage:
 
@@ -95,40 +218,89 @@ Default usage:
 .\build.ps1
 ```
 
-Preview the sync without copying, deleting, or building:
+Preview the mirror without copying, deleting, or building:
 
 ```powershell
 .\build.ps1 -PreviewSync
 ```
 
-Override the source or target directories explicitly:
+Mirror the app but skip the actual build:
+
+```powershell
+.\build.ps1 -SkipBuild
+```
+
+Override the paths:
 
 ```powershell
 .\build.ps1 `
-  -SourceDir C:\Users\Joe\Projects\FlipPar `
+  -SourceDir C:\Users\Joe\Projects\FlipBuzzer `
   -FirmwareDir C:\Users\Joe\Projects\flipperzero-firmware `
-  -TargetDir C:\Users\Joe\Projects\flipperzero-firmware\applications_user\flippar
+  -TargetDir C:\Users\Joe\Projects\flipperzero-firmware\applications_user\flipbuzzer
 ```
 
-The script prints the resolved `SourceDir`, `FirmwareDir`, `TargetDir`, and `AppSrc` before syncing. It also refuses to mirror if the target is the same as the source or if the target is outside the selected firmware directory.
+Important build behavior:
 
-If you copy this app into `applications_user/flippar`, copy the whole folder contents except `.git` and `README.md`. The required image files are:
+- The script refuses to mirror if source and target are the same path
+- The target must stay inside the selected firmware directory
+- The mirror excludes `.git`, `README.md`, and `build.ps1`
+- The script removes a few stale legacy files before syncing
 
-- `icon.png` at the app root
-- `assets/splash_128x64.png` in the assets folder
+Default build output:
 
-## Installing
+`C:\Users\Joe\Projects\flipperzero-firmware\build\f7-firmware-D\.extapps\flipbuzzer.fap`
 
-After building:
+## Deploying To Flipper
 
-1. Copy the generated `.fap` to your Flipper Zero SD card.
-2. Launch `FlipPar` from the Apps menu.
+`deploy_to_flipper.ps1` uploads the built `.fap` to your device and then launches it.
 
-## Notes
+Default usage:
 
-- Default round setup is 18 holes and 2 players.
-- Default player names are `P1` through `P10`.
-- Par and score values are clamped between `0` and `99`.
+```powershell
+.\deploy_to_flipper.ps1 -Force
+```
+
+Defaults used by the script:
+
+- Source file: `C:\Users\Joe\Projects\flipperzero-firmware\build\f7-firmware-D\.extapps\flipbuzzer.fap`
+- Firmware dir: `C:\Users\Joe\Projects\flipperzero-firmware`
+- Serial port: `COM17`
+- Destination dir on Flipper: `/ext/apps/GPIO`
+
+Example with explicit arguments:
+
+```powershell
+.\deploy_to_flipper.ps1 `
+  -SourceFile C:\Users\Joe\Projects\flipperzero-firmware\build\f7-firmware-D\.extapps\flipbuzzer.fap `
+  -FirmwareDir C:\Users\Joe\Projects\flipperzero-firmware `
+  -Port COM17 `
+  -DestinationDir /ext/apps/GPIO `
+  -Force
+```
+
+The deploy script relies on the Flipper firmware helper scripts:
+
+- `scripts/storage.py`
+- `scripts/runfap.py`
+
+It uses `py -3` when available, otherwise `python`.
+
+## Requirements
+
+To build and deploy from these scripts, you need:
+
+- A local Flipper Zero firmware checkout
+- The Flipper `fbt` build environment working from that firmware checkout
+- Python available as `py -3` or `python`
+- A connected Flipper Zero on the expected serial port
+
+## Current App Metadata
+
+- App ID: `flipbuzzer`
+- Name: `FlipBuzzer`
+- Category: `GPIO`
+- Version: `0.1`
+- Entry point: `flipbuzzer_app`
 
 ## Author
 
