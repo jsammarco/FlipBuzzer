@@ -52,7 +52,6 @@ typedef enum {
     FlipBuzzerScreenOutputMode,
     FlipBuzzerScreenFrequencyGenerator,
     FlipBuzzerScreenServoControl,
-    FlipBuzzerScreenSavedSoundsMenu,
     FlipBuzzerScreenFilePlayback,
     FlipBuzzerScreenMorseCode,
     FlipBuzzerScreenAbout,
@@ -70,6 +69,7 @@ typedef enum {
 
 typedef enum {
     FlipBuzzerCustomEventMorseTextReady = 1,
+    FlipBuzzerCustomEventBrowseSoundFiles,
 } FlipBuzzerCustomEvent;
 
 typedef struct {
@@ -77,13 +77,6 @@ typedef struct {
 } FlipBuzzerMainViewModel;
 
 typedef struct FlipBuzzerApp FlipBuzzerApp;
-
-typedef enum {
-    FlipBuzzerSavedSoundBuiltinStartup,
-    FlipBuzzerSavedSoundBuiltinAlert,
-    FlipBuzzerSavedSoundBrowseFiles,
-    FlipBuzzerSavedSoundCount,
-} FlipBuzzerSavedSoundItem;
 
 typedef enum {
     FlipBuzzerOutputExternal,
@@ -109,7 +102,6 @@ struct FlipBuzzerApp {
 
     FlipBuzzerScreen screen;
     uint8_t main_menu_index;
-    uint8_t saved_sound_index;
     uint32_t generator_frequency;
     uint8_t generator_duty;
     uint8_t servo_angle;
@@ -135,23 +127,9 @@ struct FlipBuzzerApp {
 static void flipbuzzer_handle_main_menu(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_generator(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_servo_control(FlipBuzzerApp* app, const InputEvent* event);
-static void flipbuzzer_handle_saved_sounds(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_file_playback(FlipBuzzerApp* app, const InputEvent* event);
+static void flipbuzzer_browse_and_play_file(FlipBuzzerApp* app);
 static void flipbuzzer_tick_callback(void* context);
-
-static const FlipBuzzerToneStep flipbuzzer_startup_sound[] = {
-    {784, 80, 50},
-    {988, 80, 50},
-    {1319, 140, 50},
-};
-
-static const FlipBuzzerToneStep flipbuzzer_alert_sound[] = {
-    {880, 140, 50},
-    {0, 50, 0},
-    {880, 140, 50},
-    {0, 50, 0},
-    {1175, 240, 50},
-};
 
 static const char* flipbuzzer_main_menu_items[FlipBuzzerMainMenuCount] = {
     "Output Mode",
@@ -160,12 +138,6 @@ static const char* flipbuzzer_main_menu_items[FlipBuzzerMainMenuCount] = {
     "Saved Sounds",
     "Morse Code",
     "About",
-};
-
-static const char* flipbuzzer_saved_sound_items[FlipBuzzerSavedSoundCount] = {
-    "Startup Chime",
-    "Alert Beep",
-    "Browse Sound Files",
 };
 
 static const char* flipbuzzer_output_mode_labels[FlipBuzzerOutputCount] = {
@@ -304,33 +276,6 @@ static void flipbuzzer_servo_start(FlipBuzzerApp* app, uint8_t angle) {
     app->generator_playing = false;
     app->servo_angle = angle;
     app->servo_active = furi_hal_pwm_is_running(FuriHalPwmOutputIdTim1PA7);
-}
-
-static void flipbuzzer_play_sequence(
-    FlipBuzzerApp* app,
-    const FlipBuzzerToneStep* steps,
-    size_t count,
-    const char* status_text) {
-    furi_assert(app);
-    furi_assert(steps);
-
-    flipbuzzer_pwm_stop(app);
-    if(status_text) {
-        flipbuzzer_set_status(app, status_text);
-        flipbuzzer_main_view_update(app);
-    }
-
-    for(size_t i = 0; i < count; i++) {
-        if(steps[i].frequency == 0 || steps[i].duty == 0) {
-            flipbuzzer_pwm_stop(app);
-        } else {
-            flipbuzzer_pwm_start(app, steps[i].frequency, steps[i].duty);
-        }
-
-        furi_delay_ms(steps[i].duration_ms);
-    }
-
-    flipbuzzer_pwm_stop(app);
 }
 
 static void flipbuzzer_file_playback_stop(FlipBuzzerApp* app) {
@@ -622,6 +567,9 @@ static bool flipbuzzer_custom_event_callback(void* context, uint32_t event) {
         flipbuzzer_set_status(app, "Morse text updated");
         view_dispatcher_switch_to_view(app->view_dispatcher, FlipBuzzerViewMain);
         return true;
+    } else if(event == FlipBuzzerCustomEventBrowseSoundFiles) {
+        flipbuzzer_browse_and_play_file(app);
+        return true;
     }
     return false;
 }
@@ -809,28 +757,6 @@ static void flipbuzzer_draw_servo_control(Canvas* canvas, const FlipBuzzerApp* a
     }
 }
 
-static void flipbuzzer_draw_saved_sounds(Canvas* canvas, const FlipBuzzerApp* app) {
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 11, "Saved Sounds");
-    canvas_set_font(canvas, FontSecondary);
-
-    for(uint8_t i = 0; i < FlipBuzzerSavedSoundCount; i++) {
-        uint8_t y = 24 + (i * 12);
-        if(i == app->saved_sound_index) {
-            canvas_draw_box(canvas, 0, y - 10, 128, 12);
-            canvas_set_color(canvas, ColorWhite);
-            canvas_draw_str(canvas, 4, y, flipbuzzer_saved_sound_items[i]);
-            canvas_set_color(canvas, ColorBlack);
-        } else {
-            canvas_draw_str(canvas, 8, y, flipbuzzer_saved_sound_items[i]);
-        }
-    }
-
-    canvas_draw_line(canvas, 0, 52, 127, 52);
-    canvas_draw_str(canvas, 2, 61, "OK Play");
-    canvas_draw_str(canvas, 78, 61, "Back Menu");
-}
-
 static void flipbuzzer_draw_file_playback(Canvas* canvas, const FlipBuzzerApp* app) {
     char line[40];
     uint8_t progress_width = 0;
@@ -910,9 +836,6 @@ static void flipbuzzer_draw_callback(Canvas* canvas, void* model) {
     case FlipBuzzerScreenServoControl:
         flipbuzzer_draw_servo_control(canvas, app);
         break;
-    case FlipBuzzerScreenSavedSoundsMenu:
-        flipbuzzer_draw_saved_sounds(canvas, app);
-        break;
     case FlipBuzzerScreenFilePlayback:
         flipbuzzer_draw_file_playback(canvas, app);
         break;
@@ -966,8 +889,6 @@ static bool flipbuzzer_input_callback(InputEvent* event, void* context) {
         flipbuzzer_handle_generator(app, event);
     } else if(app->screen == FlipBuzzerScreenServoControl) {
         flipbuzzer_handle_servo_control(app, event);
-    } else if(app->screen == FlipBuzzerScreenSavedSoundsMenu) {
-        flipbuzzer_handle_saved_sounds(app, event);
     } else if(app->screen == FlipBuzzerScreenFilePlayback) {
         flipbuzzer_handle_file_playback(app, event);
     } else if(app->screen == FlipBuzzerScreenMorseCode) {
@@ -1032,8 +953,9 @@ static void flipbuzzer_handle_main_menu(FlipBuzzerApp* app, const InputEvent* ev
             flipbuzzer_set_status(app, "Servo control on A7");
             break;
         case FlipBuzzerMainMenuSavedSounds:
-            app->screen = FlipBuzzerScreenSavedSoundsMenu;
-            flipbuzzer_set_status(app, "Built-in and file sounds");
+            flipbuzzer_set_status(app, "Browse sound files");
+            view_dispatcher_send_custom_event(
+                app->view_dispatcher, FlipBuzzerCustomEventBrowseSoundFiles);
             break;
         case FlipBuzzerMainMenuMorseCode:
             app->screen = FlipBuzzerScreenMorseCode;
@@ -1145,45 +1067,6 @@ static void flipbuzzer_handle_servo_control(FlipBuzzerApp* app, const InputEvent
     }
 }
 
-static void flipbuzzer_handle_saved_sounds(FlipBuzzerApp* app, const InputEvent* event) {
-    if(event->type != InputTypeShort && event->type != InputTypeRepeat) return;
-
-    if(event->key == InputKeyUp) {
-        if(app->saved_sound_index == 0) {
-            app->saved_sound_index = FlipBuzzerSavedSoundCount - 1;
-        } else {
-            app->saved_sound_index--;
-        }
-    } else if(event->key == InputKeyDown) {
-        app->saved_sound_index = (app->saved_sound_index + 1) % FlipBuzzerSavedSoundCount;
-    } else if(event->key == InputKeyOk) {
-        switch(app->saved_sound_index) {
-        case FlipBuzzerSavedSoundBuiltinStartup:
-            flipbuzzer_play_sequence(
-                app,
-                flipbuzzer_startup_sound,
-                COUNT_OF(flipbuzzer_startup_sound),
-                "Playing startup chime");
-            break;
-        case FlipBuzzerSavedSoundBuiltinAlert:
-            flipbuzzer_play_sequence(
-                app,
-                flipbuzzer_alert_sound,
-                COUNT_OF(flipbuzzer_alert_sound),
-                "Playing alert beep");
-            break;
-        case FlipBuzzerSavedSoundBrowseFiles:
-            flipbuzzer_browse_and_play_file(app);
-            break;
-        default:
-            break;
-        }
-    } else if(event->key == InputKeyBack) {
-        app->screen = FlipBuzzerScreenMainMenu;
-        flipbuzzer_set_status(app, "Main menu");
-    }
-}
-
 static void flipbuzzer_handle_file_playback(FlipBuzzerApp* app, const InputEvent* event) {
     if(event->type != InputTypeShort && event->type != InputTypeRepeat) return;
 
@@ -1204,7 +1087,7 @@ static void flipbuzzer_handle_file_playback(FlipBuzzerApp* app, const InputEvent
         }
     } else if(event->key == InputKeyBack) {
         flipbuzzer_file_playback_stop(app);
-        app->screen = FlipBuzzerScreenSavedSoundsMenu;
+        app->screen = FlipBuzzerScreenMainMenu;
         flipbuzzer_set_status(app, "Playback stopped");
     }
 }
@@ -1262,7 +1145,6 @@ static FlipBuzzerApp* flipbuzzer_alloc(void) {
 
     app->screen = FlipBuzzerScreenMainMenu;
     app->main_menu_index = 0;
-    app->saved_sound_index = 0;
     app->generator_frequency = FLIPBUZZER_DEFAULT_FREQ;
     app->generator_duty = FLIPBUZZER_DEFAULT_DUTY;
     app->servo_angle = FLIPBUZZER_SERVO_DEFAULT_ANGLE;
@@ -1274,7 +1156,7 @@ static FlipBuzzerApp* flipbuzzer_alloc(void) {
     app->file_playback_pending_start = false;
     app->speaker_acquired = false;
     app->running = true;
-    flipbuzzer_set_status(app, "Startup chime on launch");
+    flipbuzzer_set_status(app, "Ready");
     strlcpy(app->morse_text, "SOS", sizeof(app->morse_text));
     app->current_file_name[0] = '\0';
 
@@ -1325,11 +1207,6 @@ int32_t flipbuzzer_app(void* p) {
     FlipBuzzerApp* app = flipbuzzer_alloc();
 
     storage_simply_mkdir(app->storage, FLIPBUZZER_SOUND_DIR);
-    flipbuzzer_play_sequence(
-        app,
-        flipbuzzer_startup_sound,
-        COUNT_OF(flipbuzzer_startup_sound),
-        "Playing startup chime");
     snprintf(app->status, sizeof(app->status), "Ready: %s", flipbuzzer_get_output_label(app));
     flipbuzzer_main_view_update(app);
     view_dispatcher_run(app->view_dispatcher);
