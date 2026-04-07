@@ -26,6 +26,12 @@
 #define FLIPBUZZER_MAX_DUTY 99U
 #define FLIPBUZZER_DEFAULT_FREQ 1000U
 #define FLIPBUZZER_DEFAULT_DUTY 50U
+#define FLIPBUZZER_SERVO_FREQ 50U
+#define FLIPBUZZER_SERVO_MIN_ANGLE 0U
+#define FLIPBUZZER_SERVO_MAX_ANGLE 180U
+#define FLIPBUZZER_SERVO_DEFAULT_ANGLE 90U
+#define FLIPBUZZER_SERVO_MIN_PULSE_US 1000U
+#define FLIPBUZZER_SERVO_MAX_PULSE_US 2000U
 #define FLIPBUZZER_MAX_NOTES 128U
 #define FLIPBUZZER_STATUS_LEN 64U
 #define FLIPBUZZER_MORSE_TEXT_LEN 64U
@@ -41,6 +47,7 @@ typedef enum {
     FlipBuzzerScreenMainMenu,
     FlipBuzzerScreenOutputMode,
     FlipBuzzerScreenFrequencyGenerator,
+    FlipBuzzerScreenServoControl,
     FlipBuzzerScreenSavedSoundsMenu,
     FlipBuzzerScreenMorseCode,
     FlipBuzzerScreenAbout,
@@ -49,6 +56,7 @@ typedef enum {
 typedef enum {
     FlipBuzzerMainMenuOutputMode,
     FlipBuzzerMainMenuFrequencyGenerator,
+    FlipBuzzerMainMenuServoControl,
     FlipBuzzerMainMenuSavedSounds,
     FlipBuzzerMainMenuMorseCode,
     FlipBuzzerMainMenuAbout,
@@ -98,8 +106,10 @@ struct FlipBuzzerApp {
     uint8_t saved_sound_index;
     uint32_t generator_frequency;
     uint8_t generator_duty;
+    uint8_t servo_angle;
     FlipBuzzerOutputMode output_mode;
     bool generator_playing;
+    bool servo_active;
     bool speaker_acquired;
     bool running;
     char status[FLIPBUZZER_STATUS_LEN];
@@ -108,6 +118,7 @@ struct FlipBuzzerApp {
 
 static void flipbuzzer_handle_main_menu(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_generator(FlipBuzzerApp* app, const InputEvent* event);
+static void flipbuzzer_handle_servo_control(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_saved_sounds(FlipBuzzerApp* app, const InputEvent* event);
 
 static const FlipBuzzerToneStep flipbuzzer_startup_sound[] = {
@@ -127,6 +138,7 @@ static const FlipBuzzerToneStep flipbuzzer_alert_sound[] = {
 static const char* flipbuzzer_main_menu_items[FlipBuzzerMainMenuCount] = {
     "Output Mode",
     "Frequency Generator",
+    "Servo Control",
     "Saved Sounds",
     "Morse Code",
     "About",
@@ -154,6 +166,11 @@ static uint8_t flipbuzzer_clamp_duty(uint8_t duty) {
     if(duty < FLIPBUZZER_MIN_DUTY) return FLIPBUZZER_MIN_DUTY;
     if(duty > FLIPBUZZER_MAX_DUTY) return FLIPBUZZER_MAX_DUTY;
     return duty;
+}
+
+static uint8_t flipbuzzer_clamp_servo_angle(uint8_t angle) {
+    if(angle > FLIPBUZZER_SERVO_MAX_ANGLE) return FLIPBUZZER_SERVO_MAX_ANGLE;
+    return angle;
 }
 
 static void flipbuzzer_set_status(FlipBuzzerApp* app, const char* text) {
@@ -202,6 +219,7 @@ static void flipbuzzer_pwm_stop(FlipBuzzerApp* app) {
     }
     flipbuzzer_internal_stop(app);
     app->generator_playing = false;
+    app->servo_active = false;
 }
 
 static void flipbuzzer_pwm_start(FlipBuzzerApp* app, uint32_t frequency, uint8_t duty) {
@@ -228,6 +246,35 @@ static void flipbuzzer_pwm_start(FlipBuzzerApp* app, uint32_t frequency, uint8_t
     }
 
     app->generator_playing = external_started || internal_started;
+}
+
+static uint8_t flipbuzzer_servo_duty_from_angle(uint8_t angle) {
+    uint32_t pulse_us = FLIPBUZZER_SERVO_MIN_PULSE_US +
+                        ((uint32_t)angle * (FLIPBUZZER_SERVO_MAX_PULSE_US -
+                                            FLIPBUZZER_SERVO_MIN_PULSE_US) /
+                         FLIPBUZZER_SERVO_MAX_ANGLE);
+    uint32_t duty = (pulse_us * 100U) / 20000U;
+    if(duty < FLIPBUZZER_MIN_DUTY) duty = FLIPBUZZER_MIN_DUTY;
+    if(duty > FLIPBUZZER_MAX_DUTY) duty = FLIPBUZZER_MAX_DUTY;
+    return (uint8_t)duty;
+}
+
+static void flipbuzzer_servo_start(FlipBuzzerApp* app, uint8_t angle) {
+    furi_assert(app);
+
+    angle = flipbuzzer_clamp_servo_angle(angle);
+    flipbuzzer_internal_stop(app);
+
+    uint8_t duty = flipbuzzer_servo_duty_from_angle(angle);
+    if(furi_hal_pwm_is_running(FuriHalPwmOutputIdTim1PA7)) {
+        furi_hal_pwm_set_params(FuriHalPwmOutputIdTim1PA7, FLIPBUZZER_SERVO_FREQ, duty);
+    } else {
+        furi_hal_pwm_start(FuriHalPwmOutputIdTim1PA7, FLIPBUZZER_SERVO_FREQ, duty);
+    }
+
+    app->generator_playing = false;
+    app->servo_angle = angle;
+    app->servo_active = furi_hal_pwm_is_running(FuriHalPwmOutputIdTim1PA7);
 }
 
 static void flipbuzzer_play_sequence(
@@ -628,6 +675,30 @@ static void flipbuzzer_draw_generator(Canvas* canvas, const FlipBuzzerApp* app) 
     }
 }
 
+static void flipbuzzer_draw_servo_control(Canvas* canvas, const FlipBuzzerApp* app) {
+    char line[40];
+
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 11, "Servo Control");
+    canvas_set_font(canvas, FontSecondary);
+
+    snprintf(line, sizeof(line), "Pin: A7");
+    canvas_draw_str(canvas, 2, 25, line);
+
+    snprintf(line, sizeof(line), "Angle: %u deg", app->servo_angle);
+    canvas_draw_str(canvas, 2, 37, line);
+
+    canvas_draw_str(canvas, 2, 49, app->servo_active ? "State: Holding" : "State: Idle");
+
+    canvas_draw_line(canvas, 0, 52, 127, 52);
+    canvas_draw_str(canvas, 2, 61, "L/R Angle");
+    if(app->servo_active) {
+        canvas_draw_str_aligned(canvas, 126, 54, AlignRight, AlignTop, "OK Stop");
+    } else {
+        canvas_draw_str_aligned(canvas, 126, 54, AlignRight, AlignTop, "OK Hold");
+    }
+}
+
 static void flipbuzzer_draw_saved_sounds(Canvas* canvas, const FlipBuzzerApp* app) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 11, "Saved Sounds");
@@ -666,6 +737,9 @@ static void flipbuzzer_draw_callback(Canvas* canvas, void* model) {
         break;
     case FlipBuzzerScreenFrequencyGenerator:
         flipbuzzer_draw_generator(canvas, app);
+        break;
+    case FlipBuzzerScreenServoControl:
+        flipbuzzer_draw_servo_control(canvas, app);
         break;
     case FlipBuzzerScreenSavedSoundsMenu:
         flipbuzzer_draw_saved_sounds(canvas, app);
@@ -718,6 +792,8 @@ static bool flipbuzzer_input_callback(InputEvent* event, void* context) {
         }
     } else if(app->screen == FlipBuzzerScreenFrequencyGenerator) {
         flipbuzzer_handle_generator(app, event);
+    } else if(app->screen == FlipBuzzerScreenServoControl) {
+        flipbuzzer_handle_servo_control(app, event);
     } else if(app->screen == FlipBuzzerScreenSavedSoundsMenu) {
         flipbuzzer_handle_saved_sounds(app, event);
     } else if(app->screen == FlipBuzzerScreenMorseCode) {
@@ -776,6 +852,10 @@ static void flipbuzzer_handle_main_menu(FlipBuzzerApp* app, const InputEvent* ev
         case FlipBuzzerMainMenuFrequencyGenerator:
             app->screen = FlipBuzzerScreenFrequencyGenerator;
             flipbuzzer_set_status(app, "Adjust freq, duty, output");
+            break;
+        case FlipBuzzerMainMenuServoControl:
+            app->screen = FlipBuzzerScreenServoControl;
+            flipbuzzer_set_status(app, "Servo control on A7");
             break;
         case FlipBuzzerMainMenuSavedSounds:
             app->screen = FlipBuzzerScreenSavedSoundsMenu;
@@ -847,6 +927,50 @@ static void flipbuzzer_handle_generator(FlipBuzzerApp* app, const InputEvent* ev
     }
 }
 
+static void flipbuzzer_handle_servo_control(FlipBuzzerApp* app, const InputEvent* event) {
+    if(event->type != InputTypeShort && event->type != InputTypeRepeat) {
+        if(event->type == InputTypeLong && event->key == InputKeyOk) {
+            app->servo_angle = FLIPBUZZER_SERVO_DEFAULT_ANGLE;
+            if(app->servo_active) {
+                flipbuzzer_servo_start(app, app->servo_angle);
+            }
+            flipbuzzer_set_status(app, "Servo centered");
+        }
+        return;
+    }
+
+    if(event->key == InputKeyLeft) {
+        if(app->servo_angle >= 5U) {
+            app->servo_angle -= 5U;
+        } else {
+            app->servo_angle = FLIPBUZZER_SERVO_MIN_ANGLE;
+        }
+        if(app->servo_active) {
+            flipbuzzer_servo_start(app, app->servo_angle);
+        }
+    } else if(event->key == InputKeyRight) {
+        uint16_t next_angle = app->servo_angle + 5U;
+        app->servo_angle = (next_angle > FLIPBUZZER_SERVO_MAX_ANGLE) ?
+                               FLIPBUZZER_SERVO_MAX_ANGLE :
+                               (uint8_t)next_angle;
+        if(app->servo_active) {
+            flipbuzzer_servo_start(app, app->servo_angle);
+        }
+    } else if(event->key == InputKeyOk) {
+        if(app->servo_active) {
+            flipbuzzer_pwm_stop(app);
+            flipbuzzer_set_status(app, "Servo stopped");
+        } else {
+            flipbuzzer_servo_start(app, app->servo_angle);
+            flipbuzzer_set_status(app, "Servo holding on A7");
+        }
+    } else if(event->key == InputKeyBack) {
+        flipbuzzer_pwm_stop(app);
+        app->screen = FlipBuzzerScreenMainMenu;
+        flipbuzzer_set_status(app, "Main menu");
+    }
+}
+
 static void flipbuzzer_handle_saved_sounds(FlipBuzzerApp* app, const InputEvent* event) {
     if(event->type != InputTypeShort && event->type != InputTypeRepeat) return;
 
@@ -902,8 +1026,10 @@ static FlipBuzzerApp* flipbuzzer_alloc(void) {
     app->saved_sound_index = 0;
     app->generator_frequency = FLIPBUZZER_DEFAULT_FREQ;
     app->generator_duty = FLIPBUZZER_DEFAULT_DUTY;
+    app->servo_angle = FLIPBUZZER_SERVO_DEFAULT_ANGLE;
     app->output_mode = FlipBuzzerOutputBoth;
     app->generator_playing = false;
+    app->servo_active = false;
     app->speaker_acquired = false;
     app->running = true;
     flipbuzzer_set_status(app, "Startup chime on launch");

@@ -27,6 +27,7 @@ FlipBuzzer is a Flipper Zero external app for driving a buzzer from GPIO `A7`, t
 
 - Select `External`, `Internal`, or `Both` output modes
 - Live frequency generator with adjustable frequency and duty cycle
+- Servo control on GPIO `A7`
 - Built-in startup chime and alert beep
 - File browser for custom `.fbsnd` sound sequences stored on the SD card
 - Morse code text entry and playback
@@ -41,6 +42,7 @@ The main menu is the app hub. It contains:
 
 - `Output Mode`
 - `Frequency Generator`
+- `Servo Control`
 - `Saved Sounds`
 - `Morse Code`
 - `About`
@@ -51,7 +53,7 @@ The current output mode is shown in the top-right corner of the screen.
 
 Choose where sound is sent:
 
-- `External`: PWM output on GPIO `A7`
+- `External (A7)`: PWM output on GPIO `A7`
 - `Internal`: Flipper Zero internal speaker
 - `Both`: external buzzer and internal speaker together
 
@@ -79,6 +81,29 @@ Step size:
 
 - Below `1000 Hz`, frequency changes in `10 Hz` steps
 - At or above `1000 Hz`, frequency changes in `100 Hz` steps
+
+### Servo Control
+
+The servo screen is for positioning a standard PWM hobby servo on GPIO `A7`.
+
+- `Left` / `Right`: move the target angle in `5` degree steps
+- `OK`: start or stop holding the servo position
+- Long `OK`: return to center
+- `Back`: stop output and return to the main menu
+
+Defaults:
+
+- Center angle: `90 deg`
+
+Ranges:
+
+- Angle: `0 deg` to `180 deg`
+
+Servo notes:
+
+- Output is driven on `A7`
+- The servo signal uses `50 Hz` PWM
+- This screen is intended for external servo hardware, not the internal speaker
 
 ### Saved Sounds
 
@@ -140,6 +165,13 @@ The about screen is a simple information page inside the app.
 - Long `OK`: reset frequency and duty cycle
 - `Back`: stop output and return
 
+### Servo Control
+
+- `Left` / `Right`: change angle
+- `OK`: toggle servo hold and stop
+- Long `OK`: center the servo at `90 deg`
+- `Back`: stop output and return
+
 ### Saved Sounds
 
 - `Up` / `Down`: move through the list
@@ -192,6 +224,7 @@ The app creates the sound folder automatically if it does not exist:
 ## Technical Notes
 
 - External buzzer output uses Flipper PWM on `TIM1 PA7`
+- Servo control also uses PWM on `TIM1 PA7` at `50 Hz`
 - Internal speaker playback uses the Flipper speaker HAL
 - Internal speaker volume is set to `0.8`
 - The app attempts to acquire the internal speaker with a `50 ms` timeout
