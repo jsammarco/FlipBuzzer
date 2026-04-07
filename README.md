@@ -2,9 +2,14 @@
 
 FlipBuzzer is a Flipper Zero external app for driving a buzzer from GPIO `A7`, the internal speaker, or both at the same time. It includes a live frequency generator, built-in test sounds, playback for simple text-based sound files, and a Morse code sender.
 
-| Release Download |
-| --- |
-| Download the packaged `.fap` from the latest release: [FlipBuzzer Release](https://github.com/jsammarco/FlipBuzzer/releases/tag/Release) |
+<table width="100%">
+  <tr>
+    <th align="left">Release Download</th>
+  </tr>
+  <tr>
+    <td>Download the packaged <code>.fap</code> from the latest release: <a href="https://github.com/jsammarco/FlipBuzzer/releases/tag/Release">FlipBuzzer Release</a></td>
+  </tr>
+</table>
 
 ## Screenshots
 
