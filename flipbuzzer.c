@@ -359,6 +359,19 @@ static void flipbuzzer_file_playback_apply_step(FlipBuzzerApp* app) {
     }
 }
 
+static void flipbuzzer_file_playback_begin(FlipBuzzerApp* app) {
+    furi_assert(app);
+
+    if(app->file_step_count == 0) return;
+
+    app->file_step_index = 0;
+    app->file_step_elapsed_ms = 0;
+    app->file_elapsed_ms = 0;
+    app->file_playback_active = true;
+    app->file_playback_paused = false;
+    app->file_playback_pending_start = true;
+}
+
 static bool flipbuzzer_parse_u32_token(const char* token, uint32_t* value) {
     if(!token || !value || !*token) return false;
 
@@ -642,11 +655,11 @@ static void flipbuzzer_file_playback_start(FlipBuzzerApp* app, const char* path)
         app->file_total_ms += app->file_steps[i].duration_ms;
     }
 
-    app->file_playback_active = true;
+    app->file_playback_active = false;
     app->file_playback_paused = false;
-    app->file_playback_pending_start = true;
+    app->file_playback_pending_start = false;
     app->screen = FlipBuzzerScreenFilePlayback;
-    flipbuzzer_set_status(app, "File playback started");
+    flipbuzzer_set_status(app, "File loaded");
     flipbuzzer_main_view_update(app);
 }
 
@@ -841,11 +854,20 @@ static void flipbuzzer_draw_file_playback(Canvas* canvas, const FlipBuzzerApp* a
     canvas_draw_str(
         canvas, 2, 25, app->current_file_name[0] ? app->current_file_name : "<sound file>");
 
+    const char* playback_state = "Ready";
+    if(app->file_playback_paused) {
+        playback_state = "Paused";
+    } else if(app->file_playback_active) {
+        playback_state = "Playing";
+    } else if((app->file_step_count > 0) && (app->file_elapsed_ms >= app->file_total_ms)) {
+        playback_state = "Finished";
+    }
+
     snprintf(
         line,
         sizeof(line),
         "%s %lu/%lu",
-        app->file_playback_paused ? "Paused" : "Playing",
+        playback_state,
         (unsigned long)current_step,
         (unsigned long)app->file_step_count);
     canvas_draw_str(canvas, 2, 37, line);
@@ -859,7 +881,12 @@ static void flipbuzzer_draw_file_playback(Canvas* canvas, const FlipBuzzerApp* a
     }
 
     canvas_draw_line(canvas, 0, 52, 127, 52);
-    canvas_draw_str(canvas, 2, 61, app->file_playback_paused ? "OK Resume" : "OK Pause");
+    canvas_draw_str(
+        canvas,
+        2,
+        61,
+        app->file_playback_paused ? "OK Resume" :
+        (app->file_playback_active ? "OK Pause" : "OK Start"));
     canvas_draw_str_aligned(canvas, 126, 54, AlignRight, AlignTop, "Back Stop");
 }
 
@@ -1161,13 +1188,14 @@ static void flipbuzzer_handle_file_playback(FlipBuzzerApp* app, const InputEvent
     if(event->type != InputTypeShort && event->type != InputTypeRepeat) return;
 
     if(event->key == InputKeyOk) {
-        if(!app->file_playback_active) {
-            return;
-        } else if(app->file_playback_paused) {
+        if(app->file_playback_paused) {
             app->file_playback_paused = false;
             flipbuzzer_led_blink_start(app);
             flipbuzzer_file_playback_apply_step(app);
             flipbuzzer_set_status(app, "Playback resumed");
+        } else if(!app->file_playback_active) {
+            flipbuzzer_file_playback_begin(app);
+            flipbuzzer_set_status(app, "Playback started");
         } else {
             app->file_playback_paused = true;
             flipbuzzer_pwm_stop(app);
@@ -1209,7 +1237,8 @@ static void flipbuzzer_tick_callback(void* context) {
             char finished_name[FLIPBUZZER_FILE_NAME_LEN];
             strlcpy(finished_name, app->current_file_name, sizeof(finished_name));
             flipbuzzer_file_playback_stop(app);
-            app->screen = FlipBuzzerScreenSavedSoundsMenu;
+            app->file_elapsed_ms = app->file_total_ms;
+            app->file_step_index = app->file_step_count;
             snprintf(app->status, sizeof(app->status), "Finished %s", finished_name);
             break;
         }
