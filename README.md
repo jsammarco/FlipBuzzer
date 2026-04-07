@@ -4,7 +4,7 @@ FlipBuzzer is a Flipper Zero external app for driving a buzzer from GPIO `A7`, t
 
 | Release Download |
 | --- |
-| Build this repo locally with the included scripts, or package the generated `.fap` into your own Flipper workflow. |
+| Download the packaged `.fap` from the latest release: [FlipBuzzer Release](https://github.com/jsammarco/FlipBuzzer/releases/tag/Release) |
 
 ## Screenshots
 
