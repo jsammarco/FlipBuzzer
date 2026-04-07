@@ -1,5 +1,6 @@
 #include <furi.h>
 #include <furi_hal.h>
+#include <furi_hal_resources.h>
 #include <furi_hal_pwm.h>
 #include <furi_hal_speaker.h>
 #include <gui/gui.h>
@@ -12,16 +13,19 @@
 #include <lib/toolbox/path.h>
 #include <notification/notification.h>
 #include <notification/notification_messages.h>
+#include <stm32wbxx_ll_dma.h>
+#include <stm32wbxx_ll_tim.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 #define FLIPBUZZER_APP_NAME "FlipBuzzer"
 #define FLIPBUZZER_SOUND_DIR "/ext/apps_data/flipbuzzer"
 #define FLIPBUZZER_SOUND_EXT ".fbsnd"
-#define FLIPBUZZER_PLAYBACK_TICK_MS 50U
+#define FLIPBUZZER_PLAYBACK_TICK_MS 5U
 #define FLIPBUZZER_INPUT_QUEUE_SIZE 8
 #define FLIPBUZZER_MIN_FREQ 20U
 #define FLIPBUZZER_MAX_FREQ 20000U
@@ -41,6 +45,14 @@
 #define FLIPBUZZER_FILE_NAME_LEN 32U
 #define FLIPBUZZER_SPEAKER_ACQUIRE_TIMEOUT_MS 50U
 #define FLIPBUZZER_INTERNAL_VOLUME 0.8f
+#define FLIPBUZZER_DUAL_TONE_SLICE_MS 5U
+#define FLIPBUZZER_DTMF_TONE_MS 200U
+#define FLIPBUZZER_DTMF_GAP_MS 60U
+#define FLIPBUZZER_DTMF_DMA_PRESCALER 4U
+#define FLIPBUZZER_DTMF_DMA_AUTORELOAD 255U
+#define FLIPBUZZER_DTMF_CPU_CLOCK_FREQ 64000000U
+#define FLIPBUZZER_DTMF_PERIOD_2_PI 6.2832f
+#define FLIPBUZZER_DTMF_SAMPLE_BUFFER_LENGTH 8192U
 
 typedef enum {
     FlipBuzzerViewMain,
@@ -54,6 +66,7 @@ typedef enum {
     FlipBuzzerScreenServoControl,
     FlipBuzzerScreenFilePlayback,
     FlipBuzzerScreenMorseCode,
+    FlipBuzzerScreenDtmfDialer,
     FlipBuzzerScreenAbout,
 } FlipBuzzerScreen;
 
@@ -63,6 +76,7 @@ typedef enum {
     FlipBuzzerMainMenuServoControl,
     FlipBuzzerMainMenuSavedSounds,
     FlipBuzzerMainMenuMorseCode,
+    FlipBuzzerMainMenuDtmfDialer,
     FlipBuzzerMainMenuAbout,
     FlipBuzzerMainMenuCount,
 } FlipBuzzerMainMenuItem;
@@ -86,7 +100,8 @@ typedef enum {
 } FlipBuzzerOutputMode;
 
 typedef struct {
-    uint16_t frequency;
+    uint16_t freq1;
+    uint16_t freq2;
     uint16_t duration_ms;
     uint8_t duty;
 } FlipBuzzerToneStep;
@@ -117,19 +132,80 @@ struct FlipBuzzerApp {
     bool file_playback_active;
     bool file_playback_paused;
     bool file_playback_pending_start;
+    bool dual_tone_phase_high;
     bool speaker_acquired;
     bool running;
     char status[FLIPBUZZER_STATUS_LEN];
     char morse_text[FLIPBUZZER_MORSE_TEXT_LEN];
     char current_file_name[FLIPBUZZER_FILE_NAME_LEN];
+    uint8_t dtmf_row;
+    uint8_t dtmf_col;
+    uint8_t about_scroll;
+    char dtmf_last_key;
 };
+
+typedef struct {
+    char key;
+    uint16_t freq1;
+    uint16_t freq2;
+} FlipBuzzerDtmfTone;
+
+typedef struct {
+    float cached_freq;
+    size_t period;
+    float* lookup_table;
+    uint16_t offset;
+} FlipBuzzerDtmfOsc;
+
+typedef struct {
+    float duration;
+    size_t period;
+    bool* lookup_table;
+    uint16_t offset;
+} FlipBuzzerDtmfPulseFilter;
+
+typedef struct {
+    size_t buffer_length;
+    size_t half_buffer_length;
+    uint16_t* sample_buffer;
+    float volume;
+    FuriMessageQueue* queue;
+    FlipBuzzerDtmfOsc* osc1;
+    FlipBuzzerDtmfOsc* osc2;
+    FlipBuzzerDtmfPulseFilter* filter;
+    bool playing;
+} FlipBuzzerDtmfAudio;
+
+typedef struct {
+    uint32_t type;
+} FlipBuzzerDtmfEvent;
 
 static void flipbuzzer_handle_main_menu(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_generator(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_servo_control(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_file_playback(FlipBuzzerApp* app, const InputEvent* event);
+static void flipbuzzer_handle_dtmf_dialer(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_browse_and_play_file(FlipBuzzerApp* app);
 static void flipbuzzer_tick_callback(void* context);
+
+enum {
+    FlipBuzzerDtmfEventDMAHalfTransfer,
+    FlipBuzzerDtmfEventDMAFullTransfer,
+};
+
+static const char flipbuzzer_dtmf_keys[4][3] = {
+    {'1', '2', '3'},
+    {'4', '5', '6'},
+    {'7', '8', '9'},
+    {'*', '0', '#'},
+};
+
+static const FlipBuzzerDtmfTone flipbuzzer_dtmf_tones[] = {
+    {'1', 697, 1209}, {'2', 697, 1336}, {'3', 697, 1477}, {'A', 697, 1633},
+    {'4', 770, 1209}, {'5', 770, 1336}, {'6', 770, 1477}, {'B', 770, 1633},
+    {'7', 852, 1209}, {'8', 852, 1336}, {'9', 852, 1477}, {'C', 852, 1633},
+    {'*', 941, 1209}, {'0', 941, 1336}, {'#', 941, 1477}, {'D', 941, 1633},
+};
 
 static const char* flipbuzzer_main_menu_items[FlipBuzzerMainMenuCount] = {
     "Output Mode",
@@ -137,6 +213,7 @@ static const char* flipbuzzer_main_menu_items[FlipBuzzerMainMenuCount] = {
     "Servo Control",
     "Saved Sounds",
     "Morse Code",
+    "DTMF Dialer",
     "About",
 };
 
@@ -144,6 +221,15 @@ static const char* flipbuzzer_output_mode_labels[FlipBuzzerOutputCount] = {
     "External (A7)",
     "Internal",
     "Both",
+};
+
+static const char* flipbuzzer_about_lines[] = {
+    "Tone gen + files + Morse",
+    "DTMF output on PA6",
+    "DTMF audio based on",
+    "litui's DTMF Dolphin",
+    "via all-the-plugins",
+    "ConsultingJoe.com",
 };
 
 static uint32_t flipbuzzer_clamp_frequency(uint32_t frequency) {
@@ -177,6 +263,19 @@ static const char* flipbuzzer_get_output_label(const FlipBuzzerApp* app) {
     return flipbuzzer_output_mode_labels[app->output_mode];
 }
 
+static FlipBuzzerDtmfAudio* flipbuzzer_dtmf_current_player = NULL;
+
+static uint32_t flipbuzzer_dual_tone_next_frequency(FlipBuzzerApp* app, uint32_t freq1, uint32_t freq2) {
+    furi_assert(app);
+
+    if(freq1 == 0) return 0;
+    if(freq2 == 0) return freq1;
+
+    uint32_t frequency = app->dual_tone_phase_high ? freq2 : freq1;
+    app->dual_tone_phase_high = !app->dual_tone_phase_high;
+    return frequency;
+}
+
 static bool flipbuzzer_internal_start(FlipBuzzerApp* app, uint32_t frequency) {
     furi_assert(app);
 
@@ -190,6 +289,251 @@ static bool flipbuzzer_internal_start(FlipBuzzerApp* app, uint32_t frequency) {
     }
 
     return app->speaker_acquired;
+}
+
+static void flipbuzzer_dtmf_audio_dma_isr(void* ctx) {
+    FuriMessageQueue* event_queue = ctx;
+
+    if(LL_DMA_IsActiveFlag_HT1(DMA1)) {
+        LL_DMA_ClearFlag_HT1(DMA1);
+        FlipBuzzerDtmfEvent event = {.type = FlipBuzzerDtmfEventDMAHalfTransfer};
+        furi_message_queue_put(event_queue, &event, 0);
+    }
+
+    if(LL_DMA_IsActiveFlag_TC1(DMA1)) {
+        LL_DMA_ClearFlag_TC1(DMA1);
+        FlipBuzzerDtmfEvent event = {.type = FlipBuzzerDtmfEventDMAFullTransfer};
+        furi_message_queue_put(event_queue, &event, 0);
+    }
+}
+
+static FlipBuzzerDtmfOsc* flipbuzzer_dtmf_osc_alloc(void) {
+    FlipBuzzerDtmfOsc* osc = malloc(sizeof(FlipBuzzerDtmfOsc));
+    if(!osc) return NULL;
+    osc->cached_freq = 0.0f;
+    osc->period = 0;
+    osc->lookup_table = NULL;
+    osc->offset = 0;
+    return osc;
+}
+
+static FlipBuzzerDtmfPulseFilter* flipbuzzer_dtmf_filter_alloc(void) {
+    FlipBuzzerDtmfPulseFilter* filter = malloc(sizeof(FlipBuzzerDtmfPulseFilter));
+    if(!filter) return NULL;
+    filter->duration = 0.0f;
+    filter->period = 0;
+    filter->lookup_table = NULL;
+    filter->offset = 0;
+    return filter;
+}
+
+static void flipbuzzer_dtmf_audio_clear_samples(FlipBuzzerDtmfAudio* player) {
+    memset(player->sample_buffer, 0, sizeof(uint16_t) * player->buffer_length);
+}
+
+static FlipBuzzerDtmfAudio* flipbuzzer_dtmf_audio_alloc(void) {
+    FlipBuzzerDtmfAudio* player = malloc(sizeof(FlipBuzzerDtmfAudio));
+    if(!player) return NULL;
+
+    memset(player, 0, sizeof(FlipBuzzerDtmfAudio));
+    player->buffer_length = FLIPBUZZER_DTMF_SAMPLE_BUFFER_LENGTH;
+    player->half_buffer_length = FLIPBUZZER_DTMF_SAMPLE_BUFFER_LENGTH / 2U;
+    player->sample_buffer = malloc(sizeof(uint16_t) * player->buffer_length);
+    player->osc1 = flipbuzzer_dtmf_osc_alloc();
+    player->osc2 = flipbuzzer_dtmf_osc_alloc();
+    player->filter = flipbuzzer_dtmf_filter_alloc();
+    player->queue = furi_message_queue_alloc(10, sizeof(FlipBuzzerDtmfEvent));
+    player->volume = 1.0f;
+
+    if(!player->sample_buffer || !player->osc1 || !player->osc2 || !player->filter || !player->queue) {
+        return player;
+    }
+
+    flipbuzzer_dtmf_audio_clear_samples(player);
+    return player;
+}
+
+static void flipbuzzer_dtmf_osc_free(FlipBuzzerDtmfOsc* osc) {
+    if(!osc) return;
+    free(osc->lookup_table);
+    free(osc);
+}
+
+static void flipbuzzer_dtmf_filter_free(FlipBuzzerDtmfPulseFilter* filter) {
+    if(!filter) return;
+    free(filter->lookup_table);
+    free(filter);
+}
+
+static void flipbuzzer_dtmf_audio_free(FlipBuzzerDtmfAudio* player) {
+    if(!player) return;
+    if(player->queue) furi_message_queue_free(player->queue);
+    flipbuzzer_dtmf_osc_free(player->osc1);
+    flipbuzzer_dtmf_osc_free(player->osc2);
+    flipbuzzer_dtmf_filter_free(player->filter);
+    free(player->sample_buffer);
+    free(player);
+}
+
+static size_t flipbuzzer_dtmf_calc_waveform_period(float freq) {
+    if(freq <= 0.0f) return 0;
+    float dma_rate = FLIPBUZZER_DTMF_CPU_CLOCK_FREQ / 2.0f / FLIPBUZZER_DTMF_DMA_PRESCALER /
+                     (FLIPBUZZER_DTMF_DMA_AUTORELOAD + 1U);
+    return (uint16_t)(dma_rate * 2.0f / freq * 0.801923f);
+}
+
+static void flipbuzzer_dtmf_osc_generate_lookup_table(FlipBuzzerDtmfOsc* osc, float freq) {
+    if(osc->lookup_table) {
+        free(osc->lookup_table);
+        osc->lookup_table = NULL;
+    }
+
+    osc->offset = 0;
+    osc->cached_freq = freq;
+    osc->period = flipbuzzer_dtmf_calc_waveform_period(freq);
+    if(!osc->period) return;
+
+    osc->lookup_table = malloc(sizeof(float) * osc->period);
+    if(!osc->lookup_table) {
+        osc->period = 0;
+        return;
+    }
+
+    for(size_t i = 0; i < osc->period; i++) {
+        osc->lookup_table[i] = sinf((float)i * FLIPBUZZER_DTMF_PERIOD_2_PI / (float)osc->period) + 1.0f;
+    }
+}
+
+static float flipbuzzer_dtmf_sample_frame(FlipBuzzerDtmfOsc* osc) {
+    float frame = 0.0f;
+    if(osc->period) {
+        frame = osc->lookup_table[osc->offset];
+        osc->offset = (osc->offset + 1U) % osc->period;
+    }
+    return frame;
+}
+
+static bool flipbuzzer_dtmf_sample_filter(FlipBuzzerDtmfPulseFilter* filter) {
+    bool frame = true;
+    if(filter->duration) {
+        if(filter->offset < filter->duration) {
+            frame = filter->lookup_table[filter->offset];
+            filter->offset++;
+        } else {
+            frame = false;
+        }
+    }
+    return frame;
+}
+
+static bool flipbuzzer_dtmf_generate_waveform(FlipBuzzerDtmfAudio* player, uint16_t buffer_index) {
+    uint16_t* sample_buffer_start = &player->sample_buffer[buffer_index];
+
+    for(size_t i = 0; i < player->half_buffer_length; i++) {
+        float data = 0.0f;
+        if(player->osc2->period) {
+            data = (flipbuzzer_dtmf_sample_frame(player->osc1) / 2.0f) +
+                   (flipbuzzer_dtmf_sample_frame(player->osc2) / 2.0f);
+        } else {
+            data = flipbuzzer_dtmf_sample_frame(player->osc1);
+        }
+
+        data *= flipbuzzer_dtmf_sample_filter(player->filter) ? player->volume : 0.0f;
+        data *= UINT8_MAX / 2.0f;
+        data += UINT8_MAX / 2.0f;
+        if(data < 0.0f) data = 0.0f;
+        if(data > 255.0f) data = 255.0f;
+        sample_buffer_start[i] = (uint16_t)data;
+    }
+
+    return true;
+}
+
+static void flipbuzzer_dtmf_hal_gpio_deinit(void) {
+    furi_hal_gpio_init(&gpio_ext_pa6, GpioModeAnalog, GpioPullNo, GpioSpeedLow);
+    furi_hal_bus_disable(FuriHalBusTIM2);
+}
+
+static void flipbuzzer_dtmf_hal_speaker_init(void) {
+    LL_TIM_InitTypeDef tim_init = {0};
+    tim_init.Prescaler = FLIPBUZZER_DTMF_DMA_PRESCALER;
+    tim_init.Autoreload = FLIPBUZZER_DTMF_DMA_AUTORELOAD;
+    LL_TIM_Init(TIM16, &tim_init);
+
+    LL_TIM_OC_InitTypeDef tim_oc_init = {0};
+    tim_oc_init.OCMode = LL_TIM_OCMODE_PWM1;
+    tim_oc_init.OCState = LL_TIM_OCSTATE_ENABLE;
+    tim_oc_init.CompareValue = 127;
+    LL_TIM_OC_Init(TIM16, LL_TIM_CHANNEL_CH1, &tim_oc_init);
+
+    furi_hal_bus_enable(FuriHalBusTIM2);
+    furi_hal_gpio_init_ex(
+        &gpio_ext_pa6,
+        GpioModeAltFunctionPushPull,
+        GpioPullNo,
+        GpioSpeedVeryHigh,
+        GpioAltFn14TIM16);
+}
+
+static void flipbuzzer_dtmf_hal_speaker_start(void) {
+    LL_TIM_EnableAllOutputs(TIM16);
+    LL_TIM_EnableCounter(TIM16);
+}
+
+static void flipbuzzer_dtmf_hal_speaker_stop(void) {
+    LL_TIM_DisableAllOutputs(TIM16);
+    LL_TIM_DisableCounter(TIM16);
+}
+
+static void flipbuzzer_dtmf_hal_dma_init(uint32_t address, size_t size) {
+    uint32_t dma_dst = (uint32_t)&(TIM16->CCR1);
+
+    LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_1, address, dma_dst, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_1, size);
+    LL_DMA_SetPeriphRequest(DMA1, LL_DMA_CHANNEL_1, LL_DMAMUX_REQ_TIM16_UP);
+    LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_CHANNEL_1, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+    LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_1, LL_DMA_PRIORITY_VERYHIGH);
+    LL_DMA_SetMode(DMA1, LL_DMA_CHANNEL_1, LL_DMA_MODE_CIRCULAR);
+    LL_DMA_SetPeriphIncMode(DMA1, LL_DMA_CHANNEL_1, LL_DMA_PERIPH_NOINCREMENT);
+    LL_DMA_SetMemoryIncMode(DMA1, LL_DMA_CHANNEL_1, LL_DMA_MEMORY_INCREMENT);
+    LL_DMA_SetPeriphSize(DMA1, LL_DMA_CHANNEL_1, LL_DMA_PDATAALIGN_HALFWORD);
+    LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_1, LL_DMA_MDATAALIGN_HALFWORD);
+    LL_DMA_EnableIT_TC(DMA1, LL_DMA_CHANNEL_1);
+    LL_DMA_EnableIT_HT(DMA1, LL_DMA_CHANNEL_1);
+}
+
+static void flipbuzzer_dtmf_hal_dma_start(void) {
+    LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_1);
+    LL_TIM_EnableDMAReq_UPDATE(TIM16);
+}
+
+static void flipbuzzer_dtmf_hal_dma_stop(void) {
+    LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_1);
+    LL_TIM_DisableDMAReq_UPDATE(TIM16);
+    LL_DMA_ClearFlag_GI1(DMA1);
+}
+
+static bool flipbuzzer_dtmf_audio_handle_tick(void) {
+    bool handled = false;
+    if(flipbuzzer_dtmf_current_player) {
+        FlipBuzzerDtmfEvent event;
+        if(furi_message_queue_get(flipbuzzer_dtmf_current_player->queue, &event, 0) == FuriStatusOk) {
+            if(event.type == FlipBuzzerDtmfEventDMAHalfTransfer) {
+                flipbuzzer_dtmf_generate_waveform(flipbuzzer_dtmf_current_player, 0);
+                handled = true;
+            } else if(event.type == FlipBuzzerDtmfEventDMAFullTransfer) {
+                flipbuzzer_dtmf_generate_waveform(
+                    flipbuzzer_dtmf_current_player,
+                    flipbuzzer_dtmf_current_player->half_buffer_length);
+                handled = true;
+            }
+        }
+    }
+    return handled;
+}
+
+static bool flipbuzzer_dtmf_is_playing(void) {
+    return flipbuzzer_dtmf_current_player && flipbuzzer_dtmf_current_player->playing;
 }
 
 static void flipbuzzer_internal_stop(FlipBuzzerApp* app) {
@@ -223,8 +567,13 @@ static void flipbuzzer_led_blink_stop(FlipBuzzerApp* app) {
     notification_message(app->notification, &sequence_reset_green);
 }
 
-static void flipbuzzer_pwm_start(FlipBuzzerApp* app, uint32_t frequency, uint8_t duty) {
+static void flipbuzzer_output_apply(FlipBuzzerApp* app, uint32_t frequency, uint8_t duty) {
     furi_assert(app);
+    if(frequency == 0 || duty == 0) {
+        flipbuzzer_pwm_stop(app);
+        return;
+    }
+
     frequency = flipbuzzer_clamp_frequency(frequency);
     duty = flipbuzzer_clamp_duty(duty);
 
@@ -247,6 +596,121 @@ static void flipbuzzer_pwm_start(FlipBuzzerApp* app, uint32_t frequency, uint8_t
     }
 
     app->generator_playing = external_started || internal_started;
+}
+
+static void flipbuzzer_pwm_start(FlipBuzzerApp* app, uint32_t frequency, uint8_t duty) {
+    furi_assert(app);
+    app->dual_tone_phase_high = false;
+    flipbuzzer_output_apply(app, frequency, duty);
+}
+
+static void flipbuzzer_pwm_start_dual(
+    FlipBuzzerApp* app,
+    uint32_t freq1,
+    uint32_t freq2,
+    uint8_t duty) {
+    furi_assert(app);
+
+    uint32_t frequency = flipbuzzer_dual_tone_next_frequency(app, freq1, freq2);
+    flipbuzzer_output_apply(app, frequency, duty);
+}
+
+static void flipbuzzer_play_dtmf_software(
+    FlipBuzzerApp* app,
+    uint16_t freq1,
+    uint16_t freq2,
+    uint16_t duration_ms,
+    uint8_t duty) {
+    furi_assert(app);
+    UNUSED(duration_ms);
+    UNUSED(duty);
+
+    if(freq1 == 0) return;
+    if(flipbuzzer_dtmf_current_player && flipbuzzer_dtmf_current_player->playing) return;
+
+    flipbuzzer_dtmf_current_player = flipbuzzer_dtmf_audio_alloc();
+    if(!flipbuzzer_dtmf_current_player || !flipbuzzer_dtmf_current_player->sample_buffer ||
+       !flipbuzzer_dtmf_current_player->osc1 || !flipbuzzer_dtmf_current_player->osc2 ||
+       !flipbuzzer_dtmf_current_player->filter || !flipbuzzer_dtmf_current_player->queue) {
+        flipbuzzer_dtmf_audio_free(flipbuzzer_dtmf_current_player);
+        flipbuzzer_dtmf_current_player = NULL;
+        return;
+    }
+
+    flipbuzzer_dtmf_osc_generate_lookup_table(flipbuzzer_dtmf_current_player->osc1, (float)freq1);
+    flipbuzzer_dtmf_osc_generate_lookup_table(flipbuzzer_dtmf_current_player->osc2, (float)freq2);
+    flipbuzzer_dtmf_generate_waveform(flipbuzzer_dtmf_current_player, 0);
+    flipbuzzer_dtmf_generate_waveform(
+        flipbuzzer_dtmf_current_player, flipbuzzer_dtmf_current_player->half_buffer_length);
+
+    app->speaker_acquired = furi_hal_speaker_acquire(1000);
+    if(!app->speaker_acquired) {
+        flipbuzzer_dtmf_audio_free(flipbuzzer_dtmf_current_player);
+        flipbuzzer_dtmf_current_player = NULL;
+        return;
+    }
+
+    furi_hal_interrupt_set_isr(
+        FuriHalInterruptIdDma1Ch1,
+        flipbuzzer_dtmf_audio_dma_isr,
+        flipbuzzer_dtmf_current_player->queue);
+
+    flipbuzzer_dtmf_hal_speaker_init();
+    flipbuzzer_dtmf_hal_dma_init(
+        (uint32_t)flipbuzzer_dtmf_current_player->sample_buffer,
+        flipbuzzer_dtmf_current_player->buffer_length);
+    flipbuzzer_dtmf_hal_dma_start();
+    flipbuzzer_dtmf_hal_speaker_start();
+    flipbuzzer_dtmf_current_player->playing = true;
+}
+
+static void flipbuzzer_stop_dtmf_software(FlipBuzzerApp* app) {
+    furi_assert(app);
+
+    if(!flipbuzzer_dtmf_current_player) return;
+
+    flipbuzzer_dtmf_current_player->playing = false;
+    flipbuzzer_dtmf_hal_speaker_stop();
+    flipbuzzer_dtmf_hal_dma_stop();
+    flipbuzzer_dtmf_hal_gpio_deinit();
+    furi_hal_interrupt_set_isr(FuriHalInterruptIdDma1Ch1, NULL, NULL);
+    flipbuzzer_dtmf_audio_free(flipbuzzer_dtmf_current_player);
+    flipbuzzer_dtmf_current_player = NULL;
+    flipbuzzer_internal_stop(app);
+}
+
+static const FlipBuzzerDtmfTone* flipbuzzer_dtmf_lookup(char key) {
+    for(size_t i = 0; i < COUNT_OF(flipbuzzer_dtmf_tones); i++) {
+        if(flipbuzzer_dtmf_tones[i].key == key) {
+            return &flipbuzzer_dtmf_tones[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void flipbuzzer_dtmf_send(FlipBuzzerApp* app, char key) {
+    furi_assert(app);
+
+    const FlipBuzzerDtmfTone* tone = flipbuzzer_dtmf_lookup(key);
+    if(!tone) {
+        flipbuzzer_set_status(app, "Unsupported DTMF key");
+        return;
+    }
+
+    app->dtmf_last_key = key;
+    snprintf(app->status, sizeof(app->status), "DTMF %c %u+%u PA6", key, tone->freq1, tone->freq2);
+    flipbuzzer_main_view_update(app);
+    flipbuzzer_play_dtmf_software(
+        app, tone->freq1, tone->freq2, FLIPBUZZER_DTMF_TONE_MS, app->generator_duty);
+}
+
+static void flipbuzzer_dtmf_release(FlipBuzzerApp* app) {
+    furi_assert(app);
+    if(flipbuzzer_dtmf_is_playing()) {
+        flipbuzzer_stop_dtmf_software(app);
+        furi_delay_ms(FLIPBUZZER_DTMF_GAP_MS);
+    }
 }
 
 static uint8_t flipbuzzer_servo_duty_from_angle(uint8_t angle) {
@@ -297,10 +761,11 @@ static void flipbuzzer_file_playback_apply_step(FlipBuzzerApp* app) {
     }
 
     const FlipBuzzerToneStep* step = &app->file_steps[app->file_step_index];
-    if(step->frequency == 0 || step->duty == 0) {
+    if(step->freq1 == 0 || step->duty == 0) {
         flipbuzzer_pwm_stop(app);
     } else {
-        flipbuzzer_pwm_start(app, step->frequency, step->duty);
+        app->dual_tone_phase_high = false;
+        flipbuzzer_pwm_start_dual(app, step->freq1, step->freq2, step->duty);
     }
 }
 
@@ -326,6 +791,31 @@ static bool flipbuzzer_parse_u32_token(const char* token, uint32_t* value) {
 
     *value = (uint32_t)parsed;
     return true;
+}
+
+static bool flipbuzzer_parse_frequency_pair(
+    const char* token,
+    uint32_t* freq1,
+    uint32_t* freq2) {
+    if(!token || !freq1 || !freq2 || !*token) return false;
+
+    const char* plus = strchr(token, '+');
+    if(!plus) {
+        *freq2 = 0;
+        return flipbuzzer_parse_u32_token(token, freq1);
+    }
+
+    size_t first_len = (size_t)(plus - token);
+    size_t second_len = strlen(plus + 1);
+    if(first_len == 0 || second_len == 0 || first_len >= 16 || second_len >= 16) return false;
+
+    char first[16];
+    char second[16];
+    memcpy(first, token, first_len);
+    first[first_len] = '\0';
+    memcpy(second, plus + 1, second_len + 1);
+
+    return flipbuzzer_parse_u32_token(first, freq1) && flipbuzzer_parse_u32_token(second, freq2);
 }
 
 static char* flipbuzzer_next_line(char** cursor) {
@@ -406,11 +896,12 @@ static bool flipbuzzer_load_sequence_from_file(
                 size_t token_count = flipbuzzer_split_tokens(line, tokens, COUNT_OF(tokens));
 
                 if(token_count >= 2) {
-                    uint32_t frequency = 0;
+                    uint32_t freq1 = 0;
+                    uint32_t freq2 = 0;
                     uint32_t duration_ms = 0;
                     uint32_t duty = FLIPBUZZER_DEFAULT_DUTY;
 
-                    if(flipbuzzer_parse_u32_token(tokens[0], &frequency) &&
+                    if(flipbuzzer_parse_frequency_pair(tokens[0], &freq1, &freq2) &&
                        flipbuzzer_parse_u32_token(tokens[1], &duration_ms)) {
                         if(token_count >= 3) {
                             if(!flipbuzzer_parse_u32_token(tokens[2], &duty)) {
@@ -419,11 +910,13 @@ static bool flipbuzzer_load_sequence_from_file(
                         }
 
                         if(duration_ms > 0) {
-                            if(frequency > FLIPBUZZER_MAX_FREQ) frequency = FLIPBUZZER_MAX_FREQ;
+                            if(freq1 > FLIPBUZZER_MAX_FREQ) freq1 = FLIPBUZZER_MAX_FREQ;
+                            if(freq2 > FLIPBUZZER_MAX_FREQ) freq2 = FLIPBUZZER_MAX_FREQ;
                             if(duty < FLIPBUZZER_MIN_DUTY) duty = FLIPBUZZER_MIN_DUTY;
                             if(duty > FLIPBUZZER_MAX_DUTY) duty = FLIPBUZZER_MAX_DUTY;
 
-                            out_steps[parsed_count].frequency = (uint16_t)frequency;
+                            out_steps[parsed_count].freq1 = (uint16_t)freq1;
+                            out_steps[parsed_count].freq2 = (uint16_t)freq2;
                             out_steps[parsed_count].duration_ms = (uint16_t)duration_ms;
                             out_steps[parsed_count].duty = (uint8_t)duty;
                             parsed_count++;
@@ -675,15 +1168,32 @@ static void flipbuzzer_draw_main_menu(Canvas* canvas, const FlipBuzzerApp* app) 
     }
 }
 
-static void flipbuzzer_draw_about(Canvas* canvas) {
+static void flipbuzzer_draw_about(Canvas* canvas, const FlipBuzzerApp* app) {
+    const uint8_t first_line_y = 22;
+    const uint8_t line_height = 10;
+    const uint8_t visible_lines = 3;
+    const uint8_t total_lines = COUNT_OF(flipbuzzer_about_lines);
+
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 12, "About");
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 27, "Generator lets you");
-    canvas_draw_str(canvas, 2, 38, "choose Ext/Int/Both.");
-    canvas_draw_str(canvas, 2, 50, "ConsultingJoe.com");
-    canvas_draw_line(canvas, 0, 52, 127, 52);
-    canvas_draw_str(canvas, 2, 61, "Back Menu");
+
+    for(uint8_t row = 0; row < visible_lines; row++) {
+        uint8_t line_index = row + app->about_scroll;
+        if(line_index >= total_lines) break;
+        canvas_draw_str(canvas, 2, first_line_y + (row * line_height), flipbuzzer_about_lines[line_index]);
+    }
+
+    if(app->about_scroll > 0) {
+        canvas_draw_str(canvas, 120, 24, "^");
+    }
+    if((uint8_t)(app->about_scroll + visible_lines) < total_lines) {
+        canvas_draw_str(canvas, 120, 48, "v");
+    }
+
+    canvas_draw_line(canvas, 0, 54, 127, 54);
+    canvas_draw_str(canvas, 2, 61, "Up/Down Scroll");
+    canvas_draw_str_aligned(canvas, 126, 56, AlignRight, AlignTop, "Back Menu");
 }
 
 static void flipbuzzer_draw_output_mode(Canvas* canvas, const FlipBuzzerApp* app) {
@@ -731,6 +1241,52 @@ static void flipbuzzer_draw_generator(Canvas* canvas, const FlipBuzzerApp* app) 
     } else {
         canvas_draw_str_aligned(canvas, 126, 54, AlignRight, AlignTop, "OK Play");
     }
+}
+
+static char flipbuzzer_get_selected_dtmf_key(const FlipBuzzerApp* app) {
+    furi_assert(app);
+    return flipbuzzer_dtmf_keys[app->dtmf_row][app->dtmf_col];
+}
+
+static void flipbuzzer_draw_dtmf_dialer(Canvas* canvas, const FlipBuzzerApp* app) {
+    char line[40];
+
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 11, "DTMF Dialer");
+    canvas_set_font(canvas, FontSecondary);
+
+    for(uint8_t row = 0; row < 4; row++) {
+        for(uint8_t col = 0; col < 3; col++) {
+            const uint8_t x = 6 + (col * 22);
+            const uint8_t y = 18 + (row * 10);
+            const uint8_t text_y = y + 2;
+            const bool selected = (row == app->dtmf_row) && (col == app->dtmf_col);
+            if(selected) {
+                canvas_draw_box(canvas, x - 5, y - 7, 16, 12);
+                canvas_set_color(canvas, ColorWhite);
+            }
+            char key[2] = {flipbuzzer_dtmf_keys[row][col], '\0'};
+            canvas_draw_str(canvas, x, text_y, key);
+            if(selected) {
+                canvas_set_color(canvas, ColorBlack);
+            }
+        }
+    }
+
+    snprintf(line, sizeof(line), "Last: %c", app->dtmf_last_key ? app->dtmf_last_key : '-');
+    canvas_draw_str(canvas, 76, 24, line);
+
+    const FlipBuzzerDtmfTone* tone = flipbuzzer_dtmf_lookup(flipbuzzer_get_selected_dtmf_key(app));
+    if(tone) {
+        snprintf(line, sizeof(line), "%u+%u Hz", tone->freq1, tone->freq2);
+        canvas_draw_str(canvas, 76, 36, line);
+    }
+
+    canvas_draw_str(canvas, 76, 48, "DTMF: PA6");
+
+    canvas_draw_line(canvas, 0, 52, 127, 52);
+    canvas_draw_str(canvas, 2, 61, "OK Send");
+    canvas_draw_str_aligned(canvas, 126, 54, AlignRight, AlignTop, "Back Menu");
 }
 
 static void flipbuzzer_draw_servo_control(Canvas* canvas, const FlipBuzzerApp* app) {
@@ -850,8 +1406,11 @@ static void flipbuzzer_draw_callback(Canvas* canvas, void* model) {
         canvas_draw_str(canvas, 2, 61, "Back Menu");
         break;
     }
+    case FlipBuzzerScreenDtmfDialer:
+        flipbuzzer_draw_dtmf_dialer(canvas, app);
+        break;
     case FlipBuzzerScreenAbout:
-        flipbuzzer_draw_about(canvas);
+        flipbuzzer_draw_about(canvas, app);
         break;
     }
 
@@ -912,11 +1471,22 @@ static bool flipbuzzer_input_callback(InputEvent* event, void* context) {
             app->screen = FlipBuzzerScreenMainMenu;
             flipbuzzer_set_status(app, "Main menu");
         }
+    } else if(app->screen == FlipBuzzerScreenDtmfDialer) {
+        flipbuzzer_handle_dtmf_dialer(app, event);
     } else if(app->screen == FlipBuzzerScreenAbout) {
-        if((event->type == InputTypeShort || event->type == InputTypeRepeat) &&
-           event->key == InputKeyBack) {
-            app->screen = FlipBuzzerScreenMainMenu;
-            flipbuzzer_set_status(app, "Main menu");
+        if(event->type == InputTypeShort || event->type == InputTypeRepeat) {
+            if(event->key == InputKeyUp) {
+                if(app->about_scroll > 0) app->about_scroll--;
+            } else if(event->key == InputKeyDown) {
+                const uint8_t visible_lines = 3;
+                const uint8_t total_lines = COUNT_OF(flipbuzzer_about_lines);
+                if((uint8_t)(app->about_scroll + visible_lines) < total_lines) {
+                    app->about_scroll++;
+                }
+            } else if(event->key == InputKeyBack) {
+                app->screen = FlipBuzzerScreenMainMenu;
+                flipbuzzer_set_status(app, "Main menu");
+            }
         }
     }
 
@@ -961,8 +1531,13 @@ static void flipbuzzer_handle_main_menu(FlipBuzzerApp* app, const InputEvent* ev
             app->screen = FlipBuzzerScreenMorseCode;
             flipbuzzer_set_status(app, "Type and send Morse");
             break;
+        case FlipBuzzerMainMenuDtmfDialer:
+            app->screen = FlipBuzzerScreenDtmfDialer;
+            flipbuzzer_set_status(app, "Select a key to send");
+            break;
         case FlipBuzzerMainMenuAbout:
             app->screen = FlipBuzzerScreenAbout;
+            app->about_scroll = 0;
             flipbuzzer_set_status(app, "");
             break;
         default:
@@ -1092,9 +1667,42 @@ static void flipbuzzer_handle_file_playback(FlipBuzzerApp* app, const InputEvent
     }
 }
 
+static void flipbuzzer_handle_dtmf_dialer(FlipBuzzerApp* app, const InputEvent* event) {
+    if(event->key == InputKeyOk) {
+        if(event->type == InputTypePress) {
+            flipbuzzer_dtmf_send(app, flipbuzzer_get_selected_dtmf_key(app));
+        } else if(event->type == InputTypeRelease) {
+            flipbuzzer_dtmf_release(app);
+        }
+        return;
+    }
+
+    if(event->type != InputTypeShort && event->type != InputTypeRepeat) return;
+
+    if(event->key == InputKeyUp) {
+        app->dtmf_row = (app->dtmf_row == 0) ? 3 : (app->dtmf_row - 1);
+    } else if(event->key == InputKeyDown) {
+        app->dtmf_row = (app->dtmf_row + 1) % 4;
+    } else if(event->key == InputKeyLeft) {
+        app->dtmf_col = (app->dtmf_col == 0) ? 2 : (app->dtmf_col - 1);
+    } else if(event->key == InputKeyRight) {
+        app->dtmf_col = (app->dtmf_col + 1) % 3;
+    } else if(event->key == InputKeyBack) {
+        flipbuzzer_dtmf_release(app);
+        flipbuzzer_pwm_stop(app);
+        app->screen = FlipBuzzerScreenMainMenu;
+        flipbuzzer_set_status(app, "Main menu");
+    }
+}
+
 static void flipbuzzer_tick_callback(void* context) {
     FlipBuzzerApp* app = context;
     furi_assert(app);
+
+    if(flipbuzzer_dtmf_is_playing()) {
+        while(flipbuzzer_dtmf_audio_handle_tick()) {
+        }
+    }
 
     if(!app->file_playback_active || app->file_playback_paused) return;
     if(app->file_playback_pending_start) {
@@ -1105,6 +1713,11 @@ static void flipbuzzer_tick_callback(void* context) {
         return;
     }
     if(app->file_step_index >= app->file_step_count) return;
+
+    const FlipBuzzerToneStep* step = &app->file_steps[app->file_step_index];
+    if(step->freq1 > 0 && step->freq2 > 0 && step->duty > 0) {
+        flipbuzzer_pwm_start_dual(app, step->freq1, step->freq2, step->duty);
+    }
 
     app->file_step_elapsed_ms += FLIPBUZZER_PLAYBACK_TICK_MS;
     app->file_elapsed_ms += FLIPBUZZER_PLAYBACK_TICK_MS;
@@ -1134,6 +1747,7 @@ static void flipbuzzer_tick_callback(void* context) {
 static FlipBuzzerApp* flipbuzzer_alloc(void) {
     FlipBuzzerApp* app = malloc(sizeof(FlipBuzzerApp));
     furi_assert(app);
+    memset(app, 0, sizeof(FlipBuzzerApp));
 
     app->gui = furi_record_open(RECORD_GUI);
     app->storage = furi_record_open(RECORD_STORAGE);
@@ -1156,6 +1770,9 @@ static FlipBuzzerApp* flipbuzzer_alloc(void) {
     app->file_playback_pending_start = false;
     app->speaker_acquired = false;
     app->running = true;
+    app->dtmf_row = 0;
+    app->dtmf_col = 0;
+    app->dtmf_last_key = '\0';
     flipbuzzer_set_status(app, "Ready");
     strlcpy(app->morse_text, "SOS", sizeof(app->morse_text));
     app->current_file_name[0] = '\0';
