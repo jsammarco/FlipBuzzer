@@ -10,6 +10,8 @@
 #include <storage/storage.h>
 #include <dialogs/dialogs.h>
 #include <lib/toolbox/path.h>
+#include <notification/notification.h>
+#include <notification/notification_messages.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +21,7 @@
 #define FLIPBUZZER_APP_NAME "FlipBuzzer"
 #define FLIPBUZZER_SOUND_DIR "/ext/apps_data/flipbuzzer"
 #define FLIPBUZZER_SOUND_EXT ".fbsnd"
+#define FLIPBUZZER_PLAYBACK_TICK_MS 50U
 #define FLIPBUZZER_INPUT_QUEUE_SIZE 8
 #define FLIPBUZZER_MIN_FREQ 20U
 #define FLIPBUZZER_MAX_FREQ 20000U
@@ -35,6 +38,7 @@
 #define FLIPBUZZER_MAX_NOTES 128U
 #define FLIPBUZZER_STATUS_LEN 64U
 #define FLIPBUZZER_MORSE_TEXT_LEN 64U
+#define FLIPBUZZER_FILE_NAME_LEN 32U
 #define FLIPBUZZER_SPEAKER_ACQUIRE_TIMEOUT_MS 50U
 #define FLIPBUZZER_INTERNAL_VOLUME 0.8f
 
@@ -49,6 +53,7 @@ typedef enum {
     FlipBuzzerScreenFrequencyGenerator,
     FlipBuzzerScreenServoControl,
     FlipBuzzerScreenSavedSoundsMenu,
+    FlipBuzzerScreenFilePlayback,
     FlipBuzzerScreenMorseCode,
     FlipBuzzerScreenAbout,
 } FlipBuzzerScreen;
@@ -100,6 +105,7 @@ struct FlipBuzzerApp {
     TextInput* text_input;
     Storage* storage;
     DialogsApp* dialogs;
+    NotificationApp* notification;
 
     FlipBuzzerScreen screen;
     uint8_t main_menu_index;
@@ -107,19 +113,31 @@ struct FlipBuzzerApp {
     uint32_t generator_frequency;
     uint8_t generator_duty;
     uint8_t servo_angle;
+    FlipBuzzerToneStep file_steps[FLIPBUZZER_MAX_NOTES];
+    size_t file_step_count;
+    size_t file_step_index;
+    uint32_t file_step_elapsed_ms;
+    uint32_t file_elapsed_ms;
+    uint32_t file_total_ms;
     FlipBuzzerOutputMode output_mode;
     bool generator_playing;
     bool servo_active;
+    bool file_playback_active;
+    bool file_playback_paused;
+    bool file_playback_pending_start;
     bool speaker_acquired;
     bool running;
     char status[FLIPBUZZER_STATUS_LEN];
     char morse_text[FLIPBUZZER_MORSE_TEXT_LEN];
+    char current_file_name[FLIPBUZZER_FILE_NAME_LEN];
 };
 
 static void flipbuzzer_handle_main_menu(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_generator(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_servo_control(FlipBuzzerApp* app, const InputEvent* event);
 static void flipbuzzer_handle_saved_sounds(FlipBuzzerApp* app, const InputEvent* event);
+static void flipbuzzer_handle_file_playback(FlipBuzzerApp* app, const InputEvent* event);
+static void flipbuzzer_tick_callback(void* context);
 
 static const FlipBuzzerToneStep flipbuzzer_startup_sound[] = {
     {784, 80, 50},
@@ -222,6 +240,17 @@ static void flipbuzzer_pwm_stop(FlipBuzzerApp* app) {
     app->servo_active = false;
 }
 
+static void flipbuzzer_led_blink_start(FlipBuzzerApp* app) {
+    furi_assert(app);
+    notification_message(app->notification, &sequence_blink_green_100);
+}
+
+static void flipbuzzer_led_blink_stop(FlipBuzzerApp* app) {
+    furi_assert(app);
+    notification_message(app->notification, &sequence_blink_stop);
+    notification_message(app->notification, &sequence_reset_green);
+}
+
 static void flipbuzzer_pwm_start(FlipBuzzerApp* app, uint32_t frequency, uint8_t duty) {
     furi_assert(app);
     frequency = flipbuzzer_clamp_frequency(frequency);
@@ -302,6 +331,32 @@ static void flipbuzzer_play_sequence(
     }
 
     flipbuzzer_pwm_stop(app);
+}
+
+static void flipbuzzer_file_playback_stop(FlipBuzzerApp* app) {
+    furi_assert(app);
+    flipbuzzer_pwm_stop(app);
+    flipbuzzer_led_blink_stop(app);
+    app->file_playback_active = false;
+    app->file_playback_paused = false;
+    app->file_playback_pending_start = false;
+}
+
+static void flipbuzzer_file_playback_apply_step(FlipBuzzerApp* app) {
+    furi_assert(app);
+
+    if(!app->file_playback_active || app->file_playback_paused ||
+       app->file_step_index >= app->file_step_count) {
+        flipbuzzer_pwm_stop(app);
+        return;
+    }
+
+    const FlipBuzzerToneStep* step = &app->file_steps[app->file_step_index];
+    if(step->frequency == 0 || step->duty == 0) {
+        flipbuzzer_pwm_stop(app);
+    } else {
+        flipbuzzer_pwm_start(app, step->frequency, step->duty);
+    }
 }
 
 static bool flipbuzzer_parse_u32_token(const char* token, uint32_t* value) {
@@ -558,21 +613,41 @@ static bool flipbuzzer_custom_event_callback(void* context, uint32_t event) {
     return false;
 }
 
-static void flipbuzzer_play_file(FlipBuzzerApp* app, const char* path) {
-    FlipBuzzerToneStep steps[FLIPBUZZER_MAX_NOTES];
-    size_t count = 0;
+static void flipbuzzer_file_playback_start(FlipBuzzerApp* app, const char* path) {
+    furi_assert(app);
+    furi_assert(path);
 
-    if(flipbuzzer_load_sequence_from_file(app, path, steps, &count)) {
-        FuriString* full_path = furi_string_alloc_set(path);
-        FuriString* file_name = furi_string_alloc();
-        path_extract_filename(full_path, file_name, true);
-        snprintf(app->status, sizeof(app->status), "Playing %s", furi_string_get_cstr(file_name));
-        furi_string_free(file_name);
-        furi_string_free(full_path);
-        flipbuzzer_play_sequence(app, steps, count, app->status);
-    } else {
+    flipbuzzer_file_playback_stop(app);
+
+    size_t count = 0;
+    if(!flipbuzzer_load_sequence_from_file(app, path, app->file_steps, &count)) {
         flipbuzzer_set_status(app, "Invalid sound file");
+        return;
     }
+
+    FuriString* full_path = furi_string_alloc_set(path);
+    FuriString* file_name = furi_string_alloc();
+    path_extract_filename(full_path, file_name, true);
+    strlcpy(
+        app->current_file_name, furi_string_get_cstr(file_name), sizeof(app->current_file_name));
+    furi_string_free(file_name);
+    furi_string_free(full_path);
+
+    app->file_step_count = count;
+    app->file_step_index = 0;
+    app->file_step_elapsed_ms = 0;
+    app->file_elapsed_ms = 0;
+    app->file_total_ms = 0;
+    for(size_t i = 0; i < count; i++) {
+        app->file_total_ms += app->file_steps[i].duration_ms;
+    }
+
+    app->file_playback_active = true;
+    app->file_playback_paused = false;
+    app->file_playback_pending_start = true;
+    app->screen = FlipBuzzerScreenFilePlayback;
+    flipbuzzer_set_status(app, "File playback started");
+    flipbuzzer_main_view_update(app);
 }
 
 static void flipbuzzer_browse_and_play_file(FlipBuzzerApp* app) {
@@ -588,7 +663,7 @@ static void flipbuzzer_browse_and_play_file(FlipBuzzerApp* app) {
     browser_options.skip_assets = true;
 
     if(dialog_file_browser_show(app->dialogs, path, path, &browser_options)) {
-        flipbuzzer_play_file(app, furi_string_get_cstr(path));
+        flipbuzzer_file_playback_start(app, furi_string_get_cstr(path));
     } else {
         flipbuzzer_set_status(app, "File selection canceled");
     }
@@ -743,6 +818,51 @@ static void flipbuzzer_draw_saved_sounds(Canvas* canvas, const FlipBuzzerApp* ap
     canvas_draw_str(canvas, 78, 61, "Back Menu");
 }
 
+static void flipbuzzer_draw_file_playback(Canvas* canvas, const FlipBuzzerApp* app) {
+    char line[40];
+    uint8_t progress_width = 0;
+    uint32_t progress_percent = 0;
+    uint32_t current_step = 0;
+
+    if(app->file_total_ms > 0) {
+        progress_percent = (app->file_elapsed_ms * 100U) / app->file_total_ms;
+        progress_width = (uint8_t)((app->file_elapsed_ms * 122U) / app->file_total_ms);
+        if(progress_width > 122) progress_width = 122;
+    }
+
+    if(app->file_step_count > 0) {
+        current_step = app->file_step_index + (app->file_playback_active ? 1U : 0U);
+        if(current_step > app->file_step_count) current_step = app->file_step_count;
+    }
+
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 11, "File Playback");
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str(
+        canvas, 2, 25, app->current_file_name[0] ? app->current_file_name : "<sound file>");
+
+    snprintf(
+        line,
+        sizeof(line),
+        "%s %lu/%lu",
+        app->file_playback_paused ? "Paused" : "Playing",
+        (unsigned long)current_step,
+        (unsigned long)app->file_step_count);
+    canvas_draw_str(canvas, 2, 37, line);
+
+    snprintf(line, sizeof(line), "%lu%%", (unsigned long)progress_percent);
+    canvas_draw_str_aligned(canvas, 126, 33, AlignRight, AlignTop, line);
+
+    canvas_draw_frame(canvas, 2, 41, 124, 8);
+    if(progress_width > 0) {
+        canvas_draw_box(canvas, 3, 42, progress_width, 6);
+    }
+
+    canvas_draw_line(canvas, 0, 52, 127, 52);
+    canvas_draw_str(canvas, 2, 61, app->file_playback_paused ? "OK Resume" : "OK Pause");
+    canvas_draw_str_aligned(canvas, 126, 54, AlignRight, AlignTop, "Back Stop");
+}
+
 static void flipbuzzer_draw_callback(Canvas* canvas, void* model) {
     FlipBuzzerMainViewModel* main_model = model;
     FlipBuzzerApp* app = main_model->app;
@@ -765,6 +885,9 @@ static void flipbuzzer_draw_callback(Canvas* canvas, void* model) {
         break;
     case FlipBuzzerScreenSavedSoundsMenu:
         flipbuzzer_draw_saved_sounds(canvas, app);
+        break;
+    case FlipBuzzerScreenFilePlayback:
+        flipbuzzer_draw_file_playback(canvas, app);
         break;
     case FlipBuzzerScreenMorseCode: {
         canvas_set_font(canvas, FontPrimary);
@@ -818,6 +941,8 @@ static bool flipbuzzer_input_callback(InputEvent* event, void* context) {
         flipbuzzer_handle_servo_control(app, event);
     } else if(app->screen == FlipBuzzerScreenSavedSoundsMenu) {
         flipbuzzer_handle_saved_sounds(app, event);
+    } else if(app->screen == FlipBuzzerScreenFilePlayback) {
+        flipbuzzer_handle_file_playback(app, event);
     } else if(app->screen == FlipBuzzerScreenMorseCode) {
         if((event->type == InputTypeShort || event->type == InputTypeRepeat) &&
            event->key == InputKeyOk) {
@@ -1032,6 +1157,68 @@ static void flipbuzzer_handle_saved_sounds(FlipBuzzerApp* app, const InputEvent*
     }
 }
 
+static void flipbuzzer_handle_file_playback(FlipBuzzerApp* app, const InputEvent* event) {
+    if(event->type != InputTypeShort && event->type != InputTypeRepeat) return;
+
+    if(event->key == InputKeyOk) {
+        if(!app->file_playback_active) {
+            return;
+        } else if(app->file_playback_paused) {
+            app->file_playback_paused = false;
+            flipbuzzer_led_blink_start(app);
+            flipbuzzer_file_playback_apply_step(app);
+            flipbuzzer_set_status(app, "Playback resumed");
+        } else {
+            app->file_playback_paused = true;
+            flipbuzzer_pwm_stop(app);
+            flipbuzzer_led_blink_stop(app);
+            flipbuzzer_set_status(app, "Playback paused");
+        }
+    } else if(event->key == InputKeyBack) {
+        flipbuzzer_file_playback_stop(app);
+        app->screen = FlipBuzzerScreenSavedSoundsMenu;
+        flipbuzzer_set_status(app, "Playback stopped");
+    }
+}
+
+static void flipbuzzer_tick_callback(void* context) {
+    FlipBuzzerApp* app = context;
+    furi_assert(app);
+
+    if(!app->file_playback_active || app->file_playback_paused) return;
+    if(app->file_playback_pending_start) {
+        app->file_playback_pending_start = false;
+        flipbuzzer_led_blink_start(app);
+        flipbuzzer_file_playback_apply_step(app);
+        flipbuzzer_main_view_update(app);
+        return;
+    }
+    if(app->file_step_index >= app->file_step_count) return;
+
+    app->file_step_elapsed_ms += FLIPBUZZER_PLAYBACK_TICK_MS;
+    app->file_elapsed_ms += FLIPBUZZER_PLAYBACK_TICK_MS;
+    if(app->file_elapsed_ms > app->file_total_ms) {
+        app->file_elapsed_ms = app->file_total_ms;
+    }
+
+    while(app->file_step_index < app->file_step_count &&
+          app->file_step_elapsed_ms >= app->file_steps[app->file_step_index].duration_ms) {
+        app->file_step_elapsed_ms -= app->file_steps[app->file_step_index].duration_ms;
+        app->file_step_index++;
+        if(app->file_step_index >= app->file_step_count) {
+            char finished_name[FLIPBUZZER_FILE_NAME_LEN];
+            strlcpy(finished_name, app->current_file_name, sizeof(finished_name));
+            flipbuzzer_file_playback_stop(app);
+            app->screen = FlipBuzzerScreenSavedSoundsMenu;
+            snprintf(app->status, sizeof(app->status), "Finished %s", finished_name);
+            break;
+        }
+        flipbuzzer_file_playback_apply_step(app);
+    }
+
+    flipbuzzer_main_view_update(app);
+}
+
 static FlipBuzzerApp* flipbuzzer_alloc(void) {
     FlipBuzzerApp* app = malloc(sizeof(FlipBuzzerApp));
     furi_assert(app);
@@ -1039,6 +1226,7 @@ static FlipBuzzerApp* flipbuzzer_alloc(void) {
     app->gui = furi_record_open(RECORD_GUI);
     app->storage = furi_record_open(RECORD_STORAGE);
     app->dialogs = furi_record_open(RECORD_DIALOGS);
+    app->notification = furi_record_open(RECORD_NOTIFICATION);
     app->view_dispatcher = view_dispatcher_alloc();
     app->main_view = view_alloc();
     app->text_input = text_input_alloc();
@@ -1052,10 +1240,14 @@ static FlipBuzzerApp* flipbuzzer_alloc(void) {
     app->output_mode = FlipBuzzerOutputBoth;
     app->generator_playing = false;
     app->servo_active = false;
+    app->file_playback_active = false;
+    app->file_playback_paused = false;
+    app->file_playback_pending_start = false;
     app->speaker_acquired = false;
     app->running = true;
     flipbuzzer_set_status(app, "Startup chime on launch");
     strlcpy(app->morse_text, "SOS", sizeof(app->morse_text));
+    app->current_file_name[0] = '\0';
 
     view_set_context(app->main_view, app);
     view_allocate_model(app->main_view, ViewModelTypeLockFree, sizeof(FlipBuzzerMainViewModel));
@@ -1070,6 +1262,8 @@ static FlipBuzzerApp* flipbuzzer_alloc(void) {
 
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, flipbuzzer_custom_event_callback);
+    view_dispatcher_set_tick_event_callback(
+        app->view_dispatcher, flipbuzzer_tick_callback, FLIPBUZZER_PLAYBACK_TICK_MS);
     view_dispatcher_add_view(app->view_dispatcher, FlipBuzzerViewMain, app->main_view);
     view_dispatcher_add_view(
         app->view_dispatcher, FlipBuzzerViewTextInput, text_input_get_view(app->text_input));
@@ -1083,12 +1277,13 @@ static FlipBuzzerApp* flipbuzzer_alloc(void) {
 static void flipbuzzer_free(FlipBuzzerApp* app) {
     furi_assert(app);
 
-    flipbuzzer_pwm_stop(app);
+    flipbuzzer_file_playback_stop(app);
     view_dispatcher_remove_view(app->view_dispatcher, FlipBuzzerViewTextInput);
     view_dispatcher_remove_view(app->view_dispatcher, FlipBuzzerViewMain);
     text_input_free(app->text_input);
     view_free(app->main_view);
     view_dispatcher_free(app->view_dispatcher);
+    furi_record_close(RECORD_NOTIFICATION);
     furi_record_close(RECORD_DIALOGS);
     furi_record_close(RECORD_STORAGE);
     furi_record_close(RECORD_GUI);

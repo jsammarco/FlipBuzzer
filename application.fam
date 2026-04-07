@@ -12,6 +12,7 @@ App(
         "gui",
         "dialogs",
         "storage",
+        "notification",
     ],
     stack_size=4096,
 )

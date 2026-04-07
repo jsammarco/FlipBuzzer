@@ -30,6 +30,7 @@ FlipBuzzer is a Flipper Zero external app for driving a buzzer from GPIO `A7`, t
 - Servo control on GPIO `A7`
 - Built-in startup chime and alert beep
 - File browser for custom `.fbsnd` sound sequences stored on the SD card
+- Live file playback screen with progress, pause, stop, and LED blink feedback
 - Morse code text entry and playback
 - Startup sound on launch
 - Helper PowerShell scripts for building and deploying from Windows
@@ -119,6 +120,14 @@ The browse option opens the Flipper file browser at:
 
 Only files ending in `.fbsnd` are shown.
 
+When a custom sound file is playing, FlipBuzzer opens a playback screen that shows:
+
+- The current file name
+- Playback progress
+- `OK` to pause or resume
+- `Back` to stop playback and return
+- Blinking LED feedback while the file is actively playing
+
 ### Morse Code
 
 The Morse screen supports a short text message that can be sent as audio output.
@@ -177,6 +186,11 @@ The about screen is a simple information page inside the app.
 - `Up` / `Down`: move through the list
 - `OK`: play the selected sound or open the file browser
 - `Back`: return to the main menu
+
+### File Playback
+
+- `OK`: pause or resume the current `.fbsnd` file
+- `Back`: stop playback and return to `Saved Sounds`
 
 ### Morse Code
 
@@ -242,6 +256,7 @@ Tips:
 - External buzzer output uses Flipper PWM on `TIM1 PA7`
 - Servo control also uses PWM on `TIM1 PA7` at `50 Hz`
 - Internal speaker playback uses the Flipper speaker HAL
+- Custom file playback can blink the Flipper LED while a file is actively playing
 - Internal speaker volume is set to `0.8`
 - The app attempts to acquire the internal speaker with a `50 ms` timeout
 - The app stops active output when leaving the generator screen or exiting
