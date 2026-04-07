@@ -6,6 +6,18 @@ FlipBuzzer is a Flipper Zero external app for driving a buzzer from GPIO `A7`, t
 | --- |
 | Build this repo locally with the included scripts, or package the generated `.fap` into your own Flipper workflow. |
 
+## Screenshots
+
+| Main Menu | Output Modes |
+| --- | --- |
+| ![Main Menu](Screenshots/Main%20Menu.png) | ![Output Modes](Screenshots/Output%20Modes.png) |
+| Main navigation with the active output mode shown in the header. | Output destination selection for external, internal, or both. |
+
+| Saved Sounds | Morse Code |
+| --- | --- |
+| ![Saved Sounds](Screenshots/Saved%20Screen.png) | ![Morse Code](Screenshots/Morse%20Code.png) |
+| Built-in sounds plus the custom file browser entry. | Morse message editor and sender screen. |
+
 ## Features
 
 - Select `External`, `Internal`, or `Both` output modes
@@ -189,18 +201,6 @@ The app creates the sound folder automatically if it does not exist:
 - `icon.png` - app icon used by the manifest
 - `assets/splash_128x64.png` - bundled image asset
 - `Screenshots/` - example UI screenshots
-
-## Screenshots
-
-| Main Menu | Output Modes |
-| --- | --- |
-| ![Main Menu](Screenshots/Main%20Menu.png) | ![Output Modes](Screenshots/Output%20Modes.png) |
-| Main navigation with the active output mode shown in the header. | Output destination selection for external, internal, or both. |
-
-| Saved Sounds | Morse Code |
-| --- | --- |
-| ![Saved Sounds](Screenshots/Saved%20Screen.png) | ![Morse Code](Screenshots/Morse%20Code.png) |
-| Built-in sounds plus the custom file browser entry. | Morse message editor and sender screen. |
 
 ## Building
 
